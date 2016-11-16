@@ -3,6 +3,14 @@ from numpy import einsum, empty, zeros, vdot, log10, exp
 from numpy.linalg import norm
 from scipy.linalg import eig_banded
 
+class normdotndarray(np.ndarray):
+    """extension of numpy array that supports interface for lanczos_timeprop"""
+    def norm(self):
+        return norm(self)
+    def dot(self,other):
+        return vdot(self,other)
+
+
 def calc_coeff(step, a_band, HT, coeff):
     vals, vecs = eig_banded(a_band[:,:step],lower=False,overwrite_a_band=False)
     # expH(j,k) = vecs(j,i) * exp(vals(i)) * delta(i,l) * transpose(vecs(l,k))
@@ -12,19 +20,18 @@ def calc_coeff(step, a_band, HT, coeff):
     return coeff
 
 class lanczos_timeprop:
-    def __init__(self,H,phi0,maxsteps,target_convg,debug=0,do_full_order=False):
+    def __init__(self,H,maxsteps,target_convg,debug=0,do_full_order=False):
         if not callable(H):
             def Hfun(t,phi,Hphi):
-                # time-independent, assume it supports matrix multiplication interface
-                Hphi[:] = H @ phi
+                # time-independent operator
+                # assume it supports .dot for matrix-vector multiplication
+                Hphi[:] = H.dot(phi)
             self.Hfun = Hfun
         else:
             self.Hfun = H
 
         self.maxsteps = maxsteps
         self.target_convg = target_convg
-        phiashape = (maxsteps+1,) + phi0.shape
-        self.phia = np.broadcast_to(phi0, phiashape).copy().view(type(phi0))
         self.prefacs = empty(maxsteps+1)
         # this is the array that will hold the banded matrix
         self.a_band = empty((2,maxsteps+1))
@@ -36,18 +43,27 @@ class lanczos_timeprop:
 
     def propagate(self,phi0,ts,maxHT=None):
         ts = np.asarray(ts)
-        phis = np.empty([ts.shape[0],self.phia.shape[1]],dtype=complex)
-        phis[0] = phi0
-        self.phia[0] = phi0
+        assert ts.ndim==1, 'ts must be a 1d array'
+
+        if type(phi0) is np.ndarray:
+            phi0 = phi0.view(normdotndarray)
+        self.phia = [phi0.copy() for _ in range(self.maxsteps+1)]
+
+        ids = np.array(list(map(id,self.phia)))
+
         tt = ts[0]
-        for tf,phi in zip(ts[1:],phis[1:]):
+        phis = [phi0.copy()]
+        for tf in ts[1:]:
             while tt<tf:
                 HT = tf-tt
                 if maxHT is not None:
                     HT = min(HT,maxHT)
                 HT_done = self._step(tt,HT)
                 tt += HT_done
-            phi[:] = self.phia[0]
+            phis.append(self.phia[0].copy())
+
+        assert np.all(ids==np.array(list(map(id,self.phia)))), 'self.phia have not been updated in-place'
+
         return phis
 
     def _step(self,t,HT):
