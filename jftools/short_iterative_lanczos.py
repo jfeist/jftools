@@ -2,6 +2,7 @@ import numpy as np
 from numpy import einsum, empty, zeros, vdot, log10, exp
 from numpy.linalg import norm
 from scipy.linalg import eig_banded
+import warnings
 
 try:
     import qutip
@@ -30,10 +31,11 @@ class lanczos_timeprop:
             H = H.data
 
         if not callable(H):
+            # time-independent operator
+            # assume it supports .dot for matrix-vector multiplication
             def Hfun(t,phi,Hphi):
-                # time-independent operator
-                # assume it supports .dot for matrix-vector multiplication
                 Hphi[:] = H.dot(phi)
+                return Hphi
             self.Hfun = Hfun
         else:
             self.Hfun = H
@@ -65,7 +67,7 @@ class lanczos_timeprop:
 
         self.phia = [phi0.copy() for _ in range(self.maxsteps+1)]
 
-        ids = np.array(list(map(id,self.phia)))
+        ids = np.array([id(x) for x in self.phia])
 
         tt = ts[0]
         phis = [get_phi_out(phi0)]
@@ -78,7 +80,8 @@ class lanczos_timeprop:
                 tt += HT_done
             phis.append(get_phi_out(self.phia[0]))
 
-        assert np.all(ids==np.array(list(map(id,self.phia)))), 'self.phia have not been updated in-place'
+        if not np.all(ids==np.array([id(x) for x in self.phia])):
+            warnings.warn('self.phia have not been updated in-place!')
 
         return phis
 
@@ -90,6 +93,7 @@ class lanczos_timeprop:
         curr_coeff = self.curr_coeff
         prev_coeff = self.prev_coeff
         debug = self.debug
+        Hfun = self.Hfun
 
         HT_done = HT
 
@@ -103,7 +107,7 @@ class lanczos_timeprop:
 
         for step in range(1, self.maxsteps+1):
             # set |phia(step)> to H|phia(step-1)>
-            self.Hfun(t,phia[step-1],phia[step])
+            phia[step] = Hfun(t,phia[step-1],phia[step])
             prefacs[step] = prefacs[step-1]
             phinorm = prefacs[step] * phia[step].norm()
             # phinorm = sqrt(<q(step-1)|H H|q(step-1)>)
@@ -138,7 +142,7 @@ class lanczos_timeprop:
             # i.e. to prefac = 1.d0 / sqrt(<phi|phi>)
             phinorm = phia[step].norm()
             beta[step] = prefacs[step] * phinorm
-            prefacs[step] = prefacs[step] / beta[step]
+            prefacs[step] = 1. / phinorm
             if abs(log10(prefacs[step])) > 4.:
                 phia[step] *= prefacs[step]
                 prefacs[step] = 1.
@@ -194,7 +198,6 @@ class lanczos_timeprop:
 
         # build the new vector
         # do NOT include the prefactor prefac[0] into phi - we do not want to normalize it
-        # phi = curr_coeff(0) * phi
         phia[0] *= curr_coeff[0]
         cc = curr_coeff*prefacs/prefacs[0]
         for ii in range(1,step+1):
@@ -203,5 +206,5 @@ class lanczos_timeprop:
         return HT_done
 
 def sesolve_lanczos(H,phi0,ts,maxsteps,target_convg,maxHT=None,debug=0,do_full_order=False):
-    prop = lanczos_timeprop(H,phi0,maxsteps,target_convg,maxHT,debug,do_full_order)
+    prop = lanczos_timeprop(H,maxsteps,target_convg,maxHT,debug,do_full_order)
     return prop.propagate(phi0,ts)
