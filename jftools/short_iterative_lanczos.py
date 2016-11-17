@@ -3,13 +3,18 @@ from numpy import einsum, empty, zeros, vdot, log10, exp
 from numpy.linalg import norm
 from scipy.linalg import eig_banded
 
+try:
+    import qutip
+    have_qutip = True
+except:
+    have_qutip = False
+
 class normdotndarray(np.ndarray):
     """extension of numpy array that supports interface for lanczos_timeprop"""
     def norm(self):
         return norm(self)
     def dot(self,other):
         return vdot(self,other)
-
 
 def calc_coeff(step, a_band, HT, coeff):
     vals, vecs = eig_banded(a_band[:,:step],lower=False,overwrite_a_band=False)
@@ -21,6 +26,9 @@ def calc_coeff(step, a_band, HT, coeff):
 
 class lanczos_timeprop:
     def __init__(self,H,maxsteps,target_convg,debug=0,do_full_order=False):
+        if have_qutip and isinstance(H,qutip.Qobj):
+            H = H.data
+
         if not callable(H):
             def Hfun(t,phi,Hphi):
                 # time-independent operator
@@ -45,14 +53,22 @@ class lanczos_timeprop:
         ts = np.asarray(ts)
         assert ts.ndim==1, 'ts must be a 1d array'
 
-        if type(phi0) is np.ndarray:
+        get_phi_out = lambda x: x.copy()
+        if isinstance(phi0,np.ndarray):
+            get_phi_out = lambda x: x.view(np.ndarray).copy()
             phi0 = phi0.view(normdotndarray)
+        elif have_qutip and isinstance(phi0,qutip.Qobj):
+            outdims = phi0.dims.copy()
+            outtype = phi0.type
+            get_phi_out = lambda x: qutip.Qobj(x,dims=outdims,type=outtype)
+            phi0 = phi0.full().view(normdotndarray)
+
         self.phia = [phi0.copy() for _ in range(self.maxsteps+1)]
 
         ids = np.array(list(map(id,self.phia)))
 
         tt = ts[0]
-        phis = [phi0.copy()]
+        phis = [get_phi_out(phi0)]
         for tf in ts[1:]:
             while tt<tf:
                 HT = tf-tt
@@ -60,7 +76,7 @@ class lanczos_timeprop:
                     HT = min(HT,maxHT)
                 HT_done = self._step(tt,HT)
                 tt += HT_done
-            phis.append(self.phia[0].copy())
+            phis.append(get_phi_out(self.phia[0]))
 
         assert np.all(ids==np.array(list(map(id,self.phia)))), 'self.phia have not been updated in-place'
 
