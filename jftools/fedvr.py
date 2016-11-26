@@ -4,6 +4,19 @@ import scipy.linalg
 import numpy as np
 import math
 
+try:
+    from numba import jit
+except:
+    import warnings
+    warnings.warn('jftools.fedvr: not using numba!')
+    # in principle, jit can be used without options as well, which would make it trickier to deal with
+    # but here we only use the second form, so no problem
+    def jit(*args,**kwargs):
+        def g(f):
+            return f
+        return g
+
+@jit(nopython=True)
 def simpsrule(n):
     if n%2==0:
         raise ValueError('n must be odd for simpson rule')
@@ -19,6 +32,7 @@ def simpsrule(n):
         w *= h/3
     return t,w
 
+@jit(nopython=True)
 def classpol(ikind, n, alpha=0., beta=0.):
     # this procedure supplies the coefficients a(j), b(j) of the
     # recurrence relation
@@ -91,6 +105,7 @@ def classpol(ikind, n, alpha=0., beta=0.):
         b = np.sqrt(iis[:-1]*(iis[:-1]+alpha))
     return b, a, muzero
 
+@jit(nopython=True)
 def gbslve(shift, a, b):
     """this procedure performs elimination to solve for the
     n-th component of the solution delta to the equation
@@ -208,7 +223,7 @@ def gaussq(kind, n, endpts, alpha=0., beta=0.):
     #     ..................................................................
     kinds = ('simpson','legendre','chebyshev-1','chebyshev-2','hermite','jacobi','laguerre')
     ikind = kinds.index(kind)
-    
+
     if ikind==0:
         return simpsrule(n)
 
@@ -244,32 +259,33 @@ def gaussq(kind, n, endpts, alpha=0., beta=0.):
     w = muzero * w[0,:]**2
     return t, w
 
-
+@jit(nopython=True)
 def lgngr(x,y):
     """Finds Lagrange interpolating polynomials of function of x 
 and their first and second derivatives on an arbitrary grid y."""
-    from itertools import chain
     nx, ny = len(x), len(y)
     p   = np.empty((ny,nx))
     dp  = np.empty_like(p)
     ddp = np.empty_like(p)
-    dxx = x[:,None] - x[None,:]
-    dyx = y[:,None] - x[None,:]
     #     generate polynomials and derivatives with respect to x
     for i in range(ny):
         zerfac = -1
         for j in range(nx):
-            if (abs(dyx[i,j]) <= 1e-10):
+            if (abs(y[i]-x[j]) <= 1e-10):
                 zerfac = j
         for j in range(nx):
             p[i,j] = 1.
-            for k in chain(range(j),range(j+1,nx)):
-                p[i,j] *= dyx[i,k] / dxx[j,k]
+            for k in range(nx):
+                if k==j:
+                    continue
+                p[i,j] *= (y[i]-x[k])/(x[j]-x[k])
             if abs(p[i,j])>1e-10:
                 sn = 0.
                 ssn = 0.
-                for k in chain(range(j),range(j+1,nx)):
-                    fac = 1./dyx[i,k]
+                for k in range(nx):
+                    if k==j:
+                        continue
+                    fac = 1./(y[i]-x[k])
                     sn += fac
                     ssn += fac**2
                 dp[i,j] = sn*p[i,j]
@@ -280,10 +296,10 @@ and their first and second derivatives on an arbitrary grid y."""
                 for k in range(nx):
                     if k in (j,zerfac):
                         continue
-                    fac = 1./dxx[j,k]
-                    sn *= fac*dyx[i,k]
-                    ssn += 1./dyx[i,k]
-                dp[i,j] = sn/dxx[j,zerfac]
+                    fac = 1./(x[j]-x[k])
+                    sn *= fac*(y[i]-x[k])
+                    ssn += 1./(y[i]-x[k])
+                dp[i,j] = sn/(x[j]-x[zerfac])
                 ddp[i,j] = 2.*ssn*dp[i,j]
     return p,dp,ddp
 
