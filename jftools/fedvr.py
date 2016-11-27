@@ -247,7 +247,7 @@ def gaussq(kind, n, endpts, alpha=0., beta=0.):
     # now compute the eigenvalues of the symmetric tridiagonal
     # matrix, which has been modified as necessary.
     # the method used is a ql-type method with origin shifting
-    
+
     # upper form:
     # *   *   a02 a13 a24 a35
     # *   a01 a12 a23 a34 a45
@@ -261,7 +261,7 @@ def gaussq(kind, n, endpts, alpha=0., beta=0.):
 
 @jit(nopython=True)
 def lgngr(x,y):
-    """Finds Lagrange interpolating polynomials of function of x 
+    """Finds Lagrange interpolating polynomials of function of x
 and their first and second derivatives on an arbitrary grid y."""
     nx, ny = len(x), len(y)
     p   = np.empty((ny,nx))
@@ -303,26 +303,113 @@ and their first and second derivatives on an arbitrary grid y."""
                 ddp[i,j] = 2.*ssn*dp[i,j]
     return p,dp,ddp
 
-def dvr_reg(nfun,xbounds):
-    # Find zeros of nfun'th order Legendre quadrature (Gauss-Lobatto)
-    pt, wt = gaussq('legendre',nfun,[-1,1])
+class fedvr_region:
+    # NB: the weight factors wt in each region
+    # do NOT include the sum of the two weights
+    # wt_n^i + wt_1^i+1 for the bridge functions!!
+    def __init__(self,nfun,bounds):
+        self.nfun = nfun
 
-    # Set up rescaled position grid
-    xmin, xmax = xbounds
-    A = abs(xmax-xmin)/2.
-    B = (xmax+xmin)/2.
-    pt = A*pt + B
-    wt = A*wt
+        # Find zeros of nfun'th order Legendre quadrature (Gauss-Lobatto)
+        self.x, self.wt = gaussq('legendre',nfun,[-1,1])
 
-    # Generate Lagrange interpolating polynomials 
-    # and their first and second derivatives
-    f,df,ddf = lgngr(pt,pt)
+        # Set up rescaled position grid
+        xmin, xmax = bounds
+        A = abs(xmax-xmin)/2.
+        B = (xmax+xmin)/2.
+        self.x  = A*self.x + B
+        self.wt = A*self.wt
 
-    # Set up kinetic energy matrix
-    # ke[function index, point index]
-    ke_mat = ddf * wt[:,None]
-    # add the bloch contributions
-    ke_mat[ 0,:] +=  f[ 0, 0]*df[ 0,:]
-    ke_mat[-1,:] += -f[-1,-1]*df[-1,:]
-    ke_mat *= -0.5
-    return pt,wt,df,ddf,ke_mat
+        # fix that the ends sometimes do not come out as exactly the given bounds
+        self.x[[0,-1]] = bounds
+
+        # Generate Lagrange interpolating polynomials
+        # and their first and second derivatives
+        f,self.dx,self.dx2 = lgngr(self.x,self.x)
+
+        # Set up kinetic energy matrix
+        # ke[function index, point index]
+        self.ke = self.dx2 * self.wt[:,None]
+        # add the bloch contributions
+        self.ke[ 0,:] +=  f[ 0, 0]*self.dx[ 0,:]
+        self.ke[-1,:] += -f[-1,-1]*self.dx[-1,:]
+        self.ke *= -0.5
+
+class fedvr_grid:
+    def __init__(self,nfun,xels):
+        from scipy.sparse import csr_matrix
+
+        self.nfun = nfun
+        self.Nreg = len(xels)-1
+        self.regs = []
+        nx = self.Nreg*(nfun-1)+1
+        self.x  = np.empty(nx)
+        # self.wt has to be initialized to zeros!
+        self.wt = np.zeros_like(self.x)
+        istart = 0
+        for ii in range(self.Nreg):
+            reg = fedvr_region(nfun,xels[ii:ii+2])
+            iend = istart + reg.nfun
+            self.regs.append(reg)
+            self.x [istart:iend]  = reg.x
+            # the weights are additive (so bridge functions have sum of weights from the two elements)
+            self.wt[istart:iend] += reg.wt
+            # one grid point overlap
+            istart = iend-1
+
+        dx = np.zeros([nx,nx])
+        dx2 = np.zeros_like(dx)
+        istart = 0
+        for reg in self.regs:
+            iend = istart+reg.nfun
+            # we have to multiply by the weights here to take into account that
+            # the bridge function weight is actually different from the element weight
+            wtcorr = 1./np.sqrt(self.wt[istart:iend,None]*self.wt[None,istart:iend])
+            dx [istart:iend,istart:iend] += reg.dx*reg.wt[:,None] * wtcorr
+            # we use the "ke" (kinetic energy) matrix, which treats the second derivatives correctly at the boundaries
+            dx2[istart:iend,istart:iend] += -2 * reg.ke * wtcorr
+            istart = iend-1
+        # make dx explicitly anti-hermitian (this also set the diagonal to zero)
+        self.dx = csr_matrix(0.5*(dx-dx.T))
+        # make dx2 explicitly hermitian
+        self.dx2 = csr_matrix(0.5*(dx2+dx2.T))
+
+    def __repr__(self):
+        return "FEDVR basis: Rmin=%s, Rmax=%s, nfun=%s, nreg=%s, NR=%s"%(self.x[0], self.x[-1], self.nfun, self.Nreg, len(self.x))
+
+    def project_function(self,f):
+        """Takes a function f(x) and returns the coefficients c_n representing it in the FEDVR basis, f̃ = Σ c_n ϕ_n(x).
+        f must be callable with an array."""
+        return f(self.x) * np.sqrt(self.wt)
+
+    def evaluate_basis(self,cn,xs):
+        """Takes FEDVR basis coefficients c_n and returns the function values at points xs."""
+        fvals = self.get_basis_function_values(xs)
+        return cn.dot(fvals)
+
+    def get_basis_function_values(self,xs):
+        """Returns an array F_ni=f_n(x_i), where f_n(x) are the orthonormalized basis functions we use."""
+        # only interior points
+        xels = [reg.x[0] for reg in self.regs[1:]]
+        # searchsorted returns the index at which to insert into a sorted array to keep the order
+        # this is the same as the finite element number containing the point for us
+        reginds = np.searchsorted(xels, xs)
+        fvals = np.zeros([len(self.x),len(xs)])
+        istart = 0
+        for ireg,reg in enumerate(self.regs):
+            # find xs that are in this region
+            regixs = np.where(ireg==reginds)
+            if len(regixs)==0:
+                continue
+            # construct basis functions = Lagrange interpolating polynomials with weight,
+            # f_i(x_j) = δ_ij/sqrt(w_i)
+            # f_i(x) = 1/sqrt(w_i) Π_{j≠i} (x-x_j)/(x_i-x_j)
+            for ibas, xbas in enumerate(reg.x,start=istart):
+                # we have to use the _global_ weight self.wt here, which treats the bridge functions correctly
+                fvals[ibas,regixs] = 1./np.sqrt(self.wt[ibas])
+                for ix, xp in enumerate(reg.x,start=istart):
+                    if ibas!=ix:
+                        fvals[ibas,regixs] *= (xs[regixs] - xp) / (xbas - xp)
+            # next element starts nfun-1 basis functions later (-1 because of bridge function)
+            istart += reg.nfun-1
+        return fvals
