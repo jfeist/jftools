@@ -1,6 +1,6 @@
 """Collection of small useful helper tools for Python by Johannes Feist."""
 
-__version__ = '0.2'
+__version__ = '0.3'
 
 __all__ = ['shade_color','tic','toc','ipynbimport_install','unroll_phase',
            'interp_cmplx','fedvr','short_iterative_lanczos']
