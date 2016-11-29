@@ -206,5 +206,5 @@ class lanczos_timeprop:
         return HT_done
 
 def sesolve_lanczos(H,phi0,ts,maxsteps,target_convg,maxHT=None,debug=0,do_full_order=False):
-    prop = lanczos_timeprop(H,maxsteps,target_convg,maxHT,debug,do_full_order)
-    return prop.propagate(phi0,ts)
+    prop = lanczos_timeprop(H,maxsteps,target_convg,debug,do_full_order)
+    return prop.propagate(phi0,ts,maxHT)
