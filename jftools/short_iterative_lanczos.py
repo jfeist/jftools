@@ -194,7 +194,7 @@ class lanczos_timeprop:
             if debug > 5: print('convg:', convg)
 
         if debug > 6 and HT_done!=HT:
-            print('did not converge in %d iterations, step size decreased from %g to %g'%(maxsteps,HT,HT_done))
+            print('did not converge in %d iterations, step size decreased from %g to %g'%(self.maxsteps,HT,HT_done))
 
         # build the new vector
         # do NOT include the prefactor prefac[0] into phi - we do not want to normalize it
