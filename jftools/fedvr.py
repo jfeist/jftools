@@ -139,9 +139,9 @@ def gaussq(kind, n, endpts, alpha=0., beta=0.):
 
     #        ikind = 0=  simpson's rule w(x) = 1 on (-1, 1) n must be odd.
     #        ikind = 1=  legendre quadrature, w(x) = 1 on (-1, 1)
-    #        ikind = 2=  chebyshev quadrature of the first ikind
+    #        ikind = 2=  chebyshev quadrature of the first kind
     #                   w(x) = 1/dsqrt(1 - x*x) on (-1, +1)
-    #        ikind = 3=  chebyshev quadrature of the second ikind
+    #        ikind = 3=  chebyshev quadrature of the second kind
     #                   w(x) = dsqrt(1 - x*x) on (-1, 1)
     #        ikind = 4=  hermite quadrature, w(x) = exp(-x*x) on
     #                   (-infinity, +infinity)
@@ -236,7 +236,6 @@ def gaussq(kind, n, endpts, alpha=0., beta=0.):
 
     # now compute the eigenvalues of the symmetric tridiagonal
     # matrix, which has been modified as necessary.
-    # the method used is a ql-type method with origin shifting
 
     # upper form:
     # *   *   a02 a13 a24 a35
