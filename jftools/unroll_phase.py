@@ -2,7 +2,11 @@ from .myjit import jit
 import numpy as np
 
 def unroll_phase(phases):
-    return _unroll_phase(np.asarray(phases))
+    # first convert to numpy array
+    phases = np.asarray(phases)
+    # then make sure it is at least float64
+    phases = np.asarray(phases, dtype=np.promote_types(phases.dtype, np.float64))
+    return _unroll_phase(phases)
 
 @jit(nopython=True)
 def _unroll_phase(phases):
