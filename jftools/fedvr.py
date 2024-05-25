@@ -6,24 +6,26 @@ import math
 
 from .myjit import jit
 
+
 @jit(nopython=True)
 def simpsrule(n):
-    if n%2==0:
-        raise ValueError('n must be odd for simpson rule')
+    if n % 2 == 0:
+        raise ValueError("n must be odd for simpson rule")
     if n <= 1:
         t = np.zeros(1)
-        w = 2.*np.ones(1)
+        w = 2.0 * np.ones(1)
     else:
-        t = np.linspace(-1,1,n)
-        h = t[1]-t[0]
+        t = np.linspace(-1, 1, n)
+        h = t[1] - t[0]
         w = np.ones(n)
         w[1:-1:2] = 4
         w[2:-2:2] = 2
-        w *= h/3
-    return t,w
+        w *= h / 3
+    return t, w
+
 
 @jit(nopython=True)
-def classpol(ikind, n, alpha=0., beta=0.):
+def classpol(ikind, n, alpha=0.0, beta=0.0):
     # this procedure supplies the coefficients a(j), b(j) of the
     # recurrence relation
     #   b p (x) = (x - a ) p   (x) - b   p   (x)
@@ -38,62 +40,63 @@ def classpol(ikind, n, alpha=0., beta=0.):
     # jacobi polynomials, and the parameter beta is used only for
     # jacobi polynomials.  the laguerre and jacobi polynomials
     # require the gamma function.
-    if ikind==1:
+    if ikind == 1:
         # ikind = 1=  legendre polynomials p(x)
         # on (-1, +1), w(x) = 1.
-        muzero = 2.
+        muzero = 2.0
         a = np.zeros(n)
-        iis = np.arange(1,n)
-        b = iis/np.sqrt(4*iis**2-1)
-    elif ikind==2:
+        iis = np.arange(1, n)
+        b = iis / np.sqrt(4 * iis**2 - 1)
+    elif ikind == 2:
         # ikind = 2=  chebyshev polynomials of the first ikind t(x)
         # on (-1, +1), w(x) = 1 / sqrt(1 - x*x)
         muzero = np.pi
         a = np.zeros(n)
-        b = 0.5*np.ones(n-1)
+        b = 0.5 * np.ones(n - 1)
         b[0] = np.sqrt(0.5)
-    elif ikind==3:
+    elif ikind == 3:
         # ikind = 3=  chebyshev polynomials of the second ikind u(x)
         # on (-1, +1), w(x) = sqrt(1 - x*x)
-        muzero = np.pi/2.
+        muzero = np.pi / 2.0
         a = np.zeros(n)
-        b = 0.5*np.ones(n-1)
-    elif ikind==4:
+        b = 0.5 * np.ones(n - 1)
+    elif ikind == 4:
         # ikind = 4=  hermite polynomials h(x)
         # on (-infinity,+infinity), w(x) = exp(-x**2)
         muzero = np.sqrt(np.pi)
         a = np.zeros(n)
-        b = np.sqrt(np.arange(1,n)/2)
-    elif ikind==5:
+        b = np.sqrt(np.arange(1, n) / 2)
+    elif ikind == 5:
         # ikind = 5=  jacobi polynomials p(alpha, beta)(x)
         # on (-1, +1), w(x) = (1-x)**alpha + (1+x)**beta,
         # alpha and beta greater than -1
         alpha = float(alpha)
         beta = float(beta)
         ab = alpha + beta
-        abi = 2.+ab
-        muzero = 2.**(ab+1) * math.gamma(alpha+1) * math.gamma(beta+1.) / math.gamma(abi)
+        abi = 2.0 + ab
+        muzero = 2.0 ** (ab + 1) * math.gamma(alpha + 1) * math.gamma(beta + 1.0) / math.gamma(abi)
         a = np.empty(n)
-        b = np.empty(n-1)
-        a[0] = (beta - alpha)/abi
-        b[0] = np.sqrt(4.*(1.+alpha)*(1.+beta)/((abi+1.)*abi**2))
+        b = np.empty(n - 1)
+        a[0] = (beta - alpha) / abi
+        b[0] = np.sqrt(4.0 * (1.0 + alpha) * (1.0 + beta) / ((abi + 1.0) * abi**2))
         a2b2 = beta**2 - alpha**2
-        for ii in range(1,n-1):
+        for ii in range(1, n - 1):
             jj = ii + 1
-            abi = 2.*jj + ab
-            a[ii] = a2b2/((abi-2.)*abi)
-            b[ii] = np.sqrt(4.*jj*(jj+alpha)*(jj+beta)*(jj+ab)/((abi**2-1)*abi**2))
-        abi = 2.*n + ab
-        a[-1] = a2b2/((abi-2.)*abi)
-    elif ikind==6:
+            abi = 2.0 * jj + ab
+            a[ii] = a2b2 / ((abi - 2.0) * abi)
+            b[ii] = np.sqrt(4.0 * jj * (jj + alpha) * (jj + beta) * (jj + ab) / ((abi**2 - 1) * abi**2))
+        abi = 2.0 * n + ab
+        a[-1] = a2b2 / ((abi - 2.0) * abi)
+    elif ikind == 6:
         # ikind = 6=  laguerre polynomials l(alpha)(x)
         # on (0, +infinity), w(x) = exp(-x) * x**alpha, alpha greater than -1.
         alpha = float(alpha)
-        muzero = math.gamma(alpha+1.)
-        iis = np.arange(1,n+1)
-        a = 2*iis - 1 + alpha
-        b = np.sqrt(iis[:-1]*(iis[:-1]+alpha))
+        muzero = math.gamma(alpha + 1.0)
+        iis = np.arange(1, n + 1)
+        a = 2 * iis - 1 + alpha
+        b = np.sqrt(iis[:-1] * (iis[:-1] + alpha))
     return b, a, muzero
+
 
 @jit(nopython=True)
 def gbslve(shift, a, b):
@@ -107,11 +110,12 @@ def gbslve(shift, a, b):
     must be solved to obtain the appropriate changes in the lower
     2 by 2 submatrix of coefficients for orthogonal polynomials."""
     alpha = a[0] - shift
-    for ii in range(1,len(a)-1):
-        alpha = a[ii] - shift - b[ii-1]**2/alpha
-    return 1./alpha
+    for ii in range(1, len(a) - 1):
+        alpha = a[ii] - shift - b[ii - 1] ** 2 / alpha
+    return 1.0 / alpha
 
-def gaussq(kind, n, endpts, alpha=0., beta=0.):
+
+def gaussq(kind, n, endpts, alpha=0.0, beta=0.0):
     #        this set of routines computes the nodes x(i) and weights
     #        c(i) for gaussian-type quadrature rules with pre-assigned
     #        nodes.  these are used when one wishes to approximate
@@ -211,10 +215,10 @@ def gaussq(kind, n, endpts, alpha=0., beta=0.):
     #            hall, englewood cliffs, n.j., 1966.
 
     #     ..................................................................
-    kinds = ('simpson','legendre','chebyshev-1','chebyshev-2','hermite','jacobi','laguerre')
+    kinds = ("simpson", "legendre", "chebyshev-1", "chebyshev-2", "hermite", "jacobi", "laguerre")
     ikind = kinds.index(kind)
 
-    if ikind==0:
+    if ikind == 0:
         return simpsrule(n)
 
     b, t, muzero = classpol(ikind, n, alpha, beta)
@@ -224,15 +228,15 @@ def gaussq(kind, n, endpts, alpha=0., beta=0.):
     # make appropriate changes in the lower right 2 by 2
     # submatrix.
 
-    if len(endpts)==1:
+    if len(endpts) == 1:
         # if kpts=1, only t(n) must be changed
-        t[-1] = gbslve(endpts[0], t, b) * b[-1]**2 + endpts[0]
-    elif len(endpts)==2:
+        t[-1] = gbslve(endpts[0], t, b) * b[-1] ** 2 + endpts[0]
+    elif len(endpts) == 2:
         # if kpts=2, t(n) and b(n-1) must be recomputed
         gam = gbslve(endpts[0], t, b)
         t1 = (endpts[0] - endpts[1]) / (gbslve(endpts[1], t, b) - gam)
         b[-1] = np.sqrt(t1)
-        t[-1] = endpts[0] + gam*t1
+        t[-1] = endpts[0] + gam * t1
 
     # now compute the eigenvalues of the symmetric tridiagonal
     # matrix, which has been modified as necessary.
@@ -241,164 +245,268 @@ def gaussq(kind, n, endpts, alpha=0., beta=0.):
     # *   *   a02 a13 a24 a35
     # *   a01 a12 a23 a34 a45
     # a00 a11 a22 a33 a44 a55
-    A = np.empty((2,n))
-    A[0,1:] = b
-    A[1,:]  = t
+    A = np.empty((2, n))
+    A[0, 1:] = b
+    A[1, :] = t
     t, w = scipy.linalg.eig_banded(A)
-    w = muzero * w[0,:]**2
+    w = muzero * w[0, :] ** 2
     return t, w
 
+
 @jit(nopython=True)
-def lgngr(x,y):
+def lgngr(x, y):
     """Finds Lagrange interpolating polynomials of function of x
-and their first and second derivatives on an arbitrary grid y."""
+    and their first and second derivatives on an arbitrary grid y."""
     nx, ny = len(x), len(y)
-    p   = np.empty((ny,nx))
-    dp  = np.empty_like(p)
+    p = np.empty((ny, nx))
+    dp = np.empty_like(p)
     ddp = np.empty_like(p)
     #     generate polynomials and derivatives with respect to x
     for i in range(ny):
         zerfac = -1
         for j in range(nx):
-            if (abs(y[i]-x[j]) <= 1e-10):
+            if abs(y[i] - x[j]) <= 1e-10:
                 zerfac = j
         for j in range(nx):
-            p[i,j] = 1.
+            p[i, j] = 1.0
             for k in range(nx):
-                if k==j:
+                if k == j:
                     continue
-                p[i,j] *= (y[i]-x[k])/(x[j]-x[k])
-            if abs(p[i,j])>1e-10:
-                sn = 0.
-                ssn = 0.
+                p[i, j] *= (y[i] - x[k]) / (x[j] - x[k])
+            if abs(p[i, j]) > 1e-10:
+                sn = 0.0
+                ssn = 0.0
                 for k in range(nx):
-                    if k==j:
+                    if k == j:
                         continue
-                    fac = 1./(y[i]-x[k])
+                    fac = 1.0 / (y[i] - x[k])
                     sn += fac
                     ssn += fac**2
-                dp[i,j] = sn*p[i,j]
-                ddp[i,j] = sn*dp[i,j] - ssn*p[i,j]
+                dp[i, j] = sn * p[i, j]
+                ddp[i, j] = sn * dp[i, j] - ssn * p[i, j]
             else:
-                sn = 1.
-                ssn = 0.
+                sn = 1.0
+                ssn = 0.0
                 for k in range(nx):
-                    if k in (j,zerfac):
+                    if k in (j, zerfac):
                         continue
-                    fac = 1./(x[j]-x[k])
-                    sn *= fac*(y[i]-x[k])
-                    ssn += 1./(y[i]-x[k])
-                dp[i,j] = sn/(x[j]-x[zerfac])
-                ddp[i,j] = 2.*ssn*dp[i,j]
-    return p,dp,ddp
+                    fac = 1.0 / (x[j] - x[k])
+                    sn *= fac * (y[i] - x[k])
+                    ssn += 1.0 / (y[i] - x[k])
+                dp[i, j] = sn / (x[j] - x[zerfac])
+                ddp[i, j] = 2.0 * ssn * dp[i, j]
+    return p, dp, ddp
+
 
 class fedvr_region:
     # NB: the weight factors wt in each region
     # do NOT include the sum of the two weights
     # wt_n^i + wt_1^i+1 for the bridge functions!!
-    def __init__(self,nfun,bounds):
+    def __init__(self, nfun, bounds):
         self.nfun = nfun
 
         # Find zeros of nfun'th order Legendre quadrature (Gauss-Lobatto)
-        self.x, self.wt = gaussq('legendre',nfun,[-1,1])
+        self.x, self.wt = gaussq("legendre", nfun, [-1, 1])
 
         # Set up rescaled position grid
         xmin, xmax = bounds
-        A = abs(xmax-xmin)/2.
-        B = (xmax+xmin)/2.
-        self.x  = A*self.x + B
-        self.wt = A*self.wt
+        A = abs(xmax - xmin) / 2.0
+        B = (xmax + xmin) / 2.0
+        self.x = A * self.x + B
+        self.wt = A * self.wt
 
         # fix that the ends sometimes do not come out as exactly the given bounds
-        self.x[[0,-1]] = bounds
+        self.x[[0, -1]] = bounds
 
         # Generate Lagrange interpolating polynomials
         # and their first and second derivatives
-        f,self.dx,self.dx2 = lgngr(self.x,self.x)
+        f, self.dx, self.dx2 = lgngr(self.x, self.x)
 
         # Set up kinetic energy matrix
         # ke[function index, point index]
-        self.ke = self.dx2 * self.wt[:,None]
+        self.ke = self.dx2 * self.wt[:, None]
         # add the bloch contributions
-        self.ke[ 0,:] +=  f[ 0, 0]*self.dx[ 0,:]
-        self.ke[-1,:] += -f[-1,-1]*self.dx[-1,:]
+        self.ke[0, :] += f[0, 0] * self.dx[0, :]
+        self.ke[-1, :] += -f[-1, -1] * self.dx[-1, :]
         self.ke *= -0.5
 
+
 class fedvr_grid:
-    def __init__(self,nfun,xels):
+    def __init__(self, nfun, xels):
         from scipy.sparse import csr_matrix
 
         self.nfun = nfun
-        self.Nreg = len(xels)-1
+        self.Nreg = len(xels) - 1
         self.regs = []
-        nx = self.Nreg*(nfun-1)+1
-        self.x  = np.empty(nx)
+        nx = self.Nreg * (nfun - 1) + 1
+        self.x = np.empty(nx)
         # self.wt has to be initialized to zeros!
         self.wt = np.zeros_like(self.x)
         istart = 0
         for ii in range(self.Nreg):
-            reg = fedvr_region(nfun,xels[ii:ii+2])
+            reg = fedvr_region(nfun, xels[ii : ii + 2])
             iend = istart + reg.nfun
             self.regs.append(reg)
-            self.x [istart:iend]  = reg.x
+            self.x[istart:iend] = reg.x
             # the weights are additive (so bridge functions have sum of weights from the two elements)
             self.wt[istart:iend] += reg.wt
             # one grid point overlap
-            istart = iend-1
+            istart = iend - 1
 
-        dx = np.zeros([nx,nx])
+        dx = np.zeros([nx, nx])
         dx2 = np.zeros_like(dx)
         istart = 0
         for reg in self.regs:
-            iend = istart+reg.nfun
+            iend = istart + reg.nfun
             # we have to multiply by the weights here to take into account that
             # the bridge function weight is actually different from the element weight
-            wtcorr = 1./np.sqrt(self.wt[istart:iend,None]*self.wt[None,istart:iend])
-            dx [istart:iend,istart:iend] += reg.dx*reg.wt[:,None] * wtcorr
+            wtcorr = 1.0 / np.sqrt(self.wt[istart:iend, None] * self.wt[None, istart:iend])
+            dx[istart:iend, istart:iend] += reg.dx * reg.wt[:, None] * wtcorr
             # we use the "ke" (kinetic energy) matrix, which treats the second derivatives correctly at the boundaries
-            dx2[istart:iend,istart:iend] += -2 * reg.ke * wtcorr
-            istart = iend-1
+            dx2[istart:iend, istart:iend] += -2 * reg.ke * wtcorr
+            istart = iend - 1
         # make dx explicitly anti-hermitian (this also set the diagonal to zero)
-        self.dx = csr_matrix(0.5*(dx-dx.T))
+        self.dx = csr_matrix(0.5 * (dx - dx.T))
         # make dx2 explicitly hermitian
-        self.dx2 = csr_matrix(0.5*(dx2+dx2.T))
+        self.dx2 = csr_matrix(0.5 * (dx2 + dx2.T))
 
     def __repr__(self):
-        return "FEDVR basis: Rmin=%s, Rmax=%s, nfun=%s, nreg=%s, NR=%s"%(self.x[0], self.x[-1], self.nfun, self.Nreg, len(self.x))
+        return "FEDVR basis: Rmin=%s, Rmax=%s, nfun=%s, nreg=%s, NR=%s" % (self.x[0], self.x[-1], self.nfun, self.Nreg, len(self.x))
 
-    def project_function(self,f):
+    def project_function(self, f):
         """Takes a function f(x) and returns the coefficients c_n representing it in the FEDVR basis, f̃ = Σ c_n ϕ_n(x).
         f must be callable with an array."""
         return f(self.x) * np.sqrt(self.wt)
 
-    def evaluate_basis(self,cn,xs):
+    def evaluate_basis(self, cn, xs):
         """Takes FEDVR basis coefficients c_n and returns the function values at points xs."""
         fvals = self.get_basis_function_values(xs)
         return cn.dot(fvals)
 
-    def get_basis_function_values(self,xs):
+    def get_basis_function_values(self, xs):
         """Returns an array F_ni=f_n(x_i), where f_n(x) are the orthonormalized basis functions we use."""
         # only interior points
         xels = [reg.x[0] for reg in self.regs[1:]]
         # searchsorted returns the index at which to insert into a sorted array to keep the order
         # this is the same as the finite element number containing the point for us
         reginds = np.searchsorted(xels, xs)
-        fvals = np.zeros([len(self.x),len(xs)])
+        fvals = np.zeros([len(self.x), len(xs)])
         istart = 0
-        for ireg,reg in enumerate(self.regs):
+        for ireg, reg in enumerate(self.regs):
             # find xs that are in this region
-            regixs = np.where(ireg==reginds)
-            if len(regixs)==0:
+            regixs = np.where(ireg == reginds)
+            if len(regixs) == 0:
                 continue
             # construct basis functions = Lagrange interpolating polynomials with weight,
             # f_i(x_j) = δ_ij/sqrt(w_i)
             # f_i(x) = 1/sqrt(w_i) Π_{j≠i} (x-x_j)/(x_i-x_j)
-            for ibas, xbas in enumerate(reg.x,start=istart):
+            for ibas, xbas in enumerate(reg.x, start=istart):
                 # we have to use the _global_ weight self.wt here, which treats the bridge functions correctly
-                fvals[ibas,regixs] = 1./np.sqrt(self.wt[ibas])
-                for ix, xp in enumerate(reg.x,start=istart):
-                    if ibas!=ix:
-                        fvals[ibas,regixs] *= (xs[regixs] - xp) / (xbas - xp)
+                fvals[ibas, regixs] = 1.0 / np.sqrt(self.wt[ibas])
+                for ix, xp in enumerate(reg.x, start=istart):
+                    if ibas != ix:
+                        fvals[ibas, regixs] *= (xs[regixs] - xp) / (xbas - xp)
             # next element starts nfun-1 basis functions later (-1 because of bridge function)
-            istart += reg.nfun-1
+            istart += reg.nfun - 1
+        return fvals
+
+
+class fedvr_grid_ecs:
+    def __init__(self, nfun, xels, xels_ecs, ecs_angle):
+        from scipy.sparse import csr_matrix
+
+        assert xels[-1] == xels_ecs[0]
+        self.nfun = nfun
+        self.ecs_angle = ecs_angle
+        self.Nreg_real = len(xels) - 1
+        self.Nreg_ecs = len(xels_ecs) - 1
+        self.Nreg = self.Nreg_real + self.Nreg_ecs
+        self.regs = []
+        nx = self.Nreg * (nfun - 1) + 1
+        self.x = np.empty(nx)
+        # self.wt has to be initialized to zeros!
+        self.wt = np.zeros(nx, dtype=complex)
+        istart = 0
+        for ii in range(self.Nreg_real):
+            reg = fedvr_region(nfun, xels[ii : ii + 2])
+            iend = istart + reg.nfun
+            self.regs.append(reg)
+            self.x[istart:iend] = reg.x
+            # the weights are additive (so bridge functions have sum of weights from the two elements)
+            self.wt[istart:iend] += reg.wt
+            # one grid point overlap
+            istart = iend - 1
+
+        for ii in range(self.Nreg_ecs):
+            reg = fedvr_region(nfun, xels_ecs[ii : ii + 2])
+            # do complex rotation
+            reg.ke = reg.ke * np.exp(-1j * ecs_angle)
+            # reg.first_deriv does not get a factor from complex rotation
+            reg.wt = reg.wt * np.exp(1j * ecs_angle)
+            self.regs.append(reg)
+
+            iend = istart + reg.nfun
+            self.x[istart:iend] = reg.x
+            # the weights are additive (so bridge functions have sum of weights from the two elements)
+            self.wt[istart:iend] += reg.wt
+            # one grid point overlap
+            istart = iend - 1
+
+        dx = np.zeros([nx, nx], dtype=complex)
+        dx2 = np.zeros_like(dx)
+        istart = 0
+        for reg in self.regs:
+            iend = istart + reg.nfun
+            # we have to multiply by the weights here to take into account that
+            # the bridge function weight is actually different from the element weight
+            wtcorr = 1.0 / np.sqrt(self.wt[istart:iend, None] * self.wt[None, istart:iend])
+            dx[istart:iend, istart:iend] += reg.dx * reg.wt[:, None] * wtcorr
+            # we use the "ke" (kinetic energy) matrix, which treats the second derivatives correctly at the boundaries
+            dx2[istart:iend, istart:iend] += -2 * reg.ke * wtcorr
+            istart = iend - 1
+        # make dx explicitly anti-hermitian (this also set the diagonal to zero)
+        # self.dx = csr_matrix(0.5*(dx-dx.T))
+        # make dx2 explicitly hermitian
+        # self.dx2 = csr_matrix(0.5*(dx2+dx2.T))
+        self.dx = csr_matrix(dx)
+        self.dx2 = csr_matrix(dx2)
+
+    def __repr__(self):
+        return f"FEDVR basis: Rmin={self.x[0]}, Rmax={self.x[-1]}, nfun={self.nfun}, nreg={self.Nreg}, NR={len(self.x)}, Recs={self.reg[self.Nreg_real-1].x[-1]}, θecs={self.ecs_angle}"
+
+    def project_function(self, f):
+        """Takes a function f(x) and returns the coefficients c_n representing it in the FEDVR basis, f̃ = Σ c_n ϕ_n(x).
+        f must be callable with an array."""
+        return f(self.x) * np.sqrt(self.wt)
+
+    def evaluate_basis(self, cn, xs):
+        """Takes FEDVR basis coefficients c_n and returns the function values at points xs."""
+        fvals = self.get_basis_function_values(xs)
+        return cn.dot(fvals)
+
+    def get_basis_function_values(self, xs):
+        """Returns an array F_ni=f_n(x_i), where f_n(x) are the orthonormalized basis functions we use."""
+        # only interior points
+        xels = [reg.x[0] for reg in self.regs[1:]]
+        # searchsorted returns the index at which to insert into a sorted array to keep the order
+        # this is the same as the finite element number containing the point for us
+        reginds = np.searchsorted(xels, xs)
+        fvals = np.zeros([len(self.x), len(xs)])
+        istart = 0
+        for ireg, reg in enumerate(self.regs):
+            # find xs that are in this region
+            regixs = np.where(ireg == reginds)
+            if len(regixs) == 0:
+                continue
+            # construct basis functions = Lagrange interpolating polynomials with weight,
+            # f_i(x_j) = δ_ij/sqrt(w_i)
+            # f_i(x) = 1/sqrt(w_i) Π_{j≠i} (x-x_j)/(x_i-x_j)
+            for ibas, xbas in enumerate(reg.x, start=istart):
+                # we have to use the _global_ weight self.wt here, which treats the bridge functions correctly
+                fvals[ibas, regixs] = 1.0 / np.sqrt(self.wt[ibas])
+                for ix, xp in enumerate(reg.x, start=istart):
+                    if ibas != ix:
+                        fvals[ibas, regixs] *= (xs[regixs] - xp) / (xbas - xp)
+            # next element starts nfun-1 basis functions later (-1 because of bridge function)
+            istart += reg.nfun - 1
         return fvals

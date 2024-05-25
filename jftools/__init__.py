@@ -1,9 +1,8 @@
 """Collection of small useful helper tools for Python by Johannes Feist."""
 
-__version__ = '0.4.1'
+__version__ = "0.4.1"
 
-__all__ = ['shade_color','tic','toc','ipynbimport_install','unroll_phase',
-           'interp_cmplx','plotcolored','fedvr','short_iterative_lanczos']
+__all__ = ["shade_color", "tic", "toc", "ipynbimport_install", "unroll_phase", "interp_cmplx", "plotcolored", "fedvr", "short_iterative_lanczos"]
 
 from .shade_color import shade_color
 from .tictoc import tic, toc

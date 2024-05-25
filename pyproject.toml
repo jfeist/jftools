@@ -18,3 +18,8 @@ dependencies = [
 
 [project.urls]
 Home = "https://github.com/jfeist/jftools"
+
+[tool.ruff]
+line-length = 200
+[tool.ruff.format]
+skip-magic-trailing-comma = true
