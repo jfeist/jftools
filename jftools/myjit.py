@@ -1,6 +1,6 @@
 try:
     from numba import jit
-except:
+except ImportError:
     import warnings
 
     warnings.warn("jftools: not using numba - can accelerate some computations!")

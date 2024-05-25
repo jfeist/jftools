@@ -8,7 +8,7 @@ try:
     import qutip
 
     have_qutip = True
-except:
+except ImportError:
     have_qutip = False
 
 
@@ -62,14 +62,22 @@ class lanczos_timeprop:
         ts = np.asarray(ts)
         assert ts.ndim == 1, "ts must be a 1d array"
 
-        get_phi_out = lambda x: x.copy()
+        def get_phi_out(x):
+            return x.copy()
+
         if isinstance(phi0, np.ndarray):
-            get_phi_out = lambda x: x.view(np.ndarray).copy()
+
+            def get_phi_out(x):
+                return x.view(np.ndarray).copy()
+
             phi0 = phi0.view(normdotndarray)
         elif have_qutip and isinstance(phi0, qutip.Qobj):
             outdims = phi0.dims.copy()
             outtype = phi0.type
-            get_phi_out = lambda x: qutip.Qobj(x, dims=outdims, type=outtype)
+
+            def get_phi_out(x):
+                return qutip.Qobj(x, dims=outdims, type=outtype)
+
             phi0 = phi0.full().view(normdotndarray)
 
         self.phia = [phi0.copy() for _ in range(self.maxsteps + 1)]

@@ -2,7 +2,9 @@ from scipy.interpolate import InterpolatedUnivariateSpline
 from numpy import exp, angle
 from . import unroll_phase
 
-arg = lambda x: unroll_phase(angle(x))
+
+def arg(x):
+    return unroll_phase(angle(x))
 
 
 def interp_cmplx(x, y, *args, absarg=True, interpolator=InterpolatedUnivariateSpline, **kwargs):

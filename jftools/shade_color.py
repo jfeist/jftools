@@ -21,9 +21,9 @@ def shade_color(color, percent):
     from colorsys import rgb_to_hls, hls_to_rgb
     import numpy as np
 
-    r, g, b = colorConverter.to_rgb(color)
-    h, l, s = rgb_to_hls(r, g, b)
-    l *= 1 + float(percent) / 100
-    l = np.clip(l, 0, 1)
-    r, g, b = hls_to_rgb(h, l, s)
-    return r, g, b
+    R, G, B = colorConverter.to_rgb(color)
+    H, L, S = rgb_to_hls(R, G, B)
+    L *= 1 + float(percent) / 100
+    L = np.clip(L, 0, 1)
+    R, G, B = hls_to_rgb(H, L, S)
+    return R, G, B

@@ -9,7 +9,10 @@
 # so we can actually make IPython notebooks importable without much difficulty,
 # and only using public APIs.
 
-import io, os, sys, types
+import io
+import os
+import sys
+import types
 
 try:
     import nbformat
