@@ -472,7 +472,7 @@ class fedvr_grid_ecs:
         self.dx2 = csr_matrix(dx2)
 
     def __repr__(self):
-        return f"FEDVR basis: Rmin={self.x[0]}, Rmax={self.x[-1]}, nfun={self.nfun}, nreg={self.Nreg}, NR={len(self.x)}, Recs={self.reg[self.Nreg_real-1].x[-1]}, θecs={self.ecs_angle}"
+        return f"FEDVR basis: Rmin={self.x[0]}, Rmax={self.x[-1]}, nfun={self.nfun}, nreg={self.Nreg}, NR={len(self.x)}, Recs={self.reg[self.Nreg_real - 1].x[-1]}, θecs={self.ecs_angle}"
 
     def project_function(self, f):
         """Takes a function f(x) and returns the coefficients c_n representing it in the FEDVR basis, f̃ = Σ c_n ϕ_n(x).
