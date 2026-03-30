@@ -18,23 +18,19 @@ ctypedef cnp.int64_t i64
 
 
 cdef inline c128 _vdot(c128[::1] a, c128[::1] b) noexcept:
-    cdef Py_ssize_t i, n = a.shape[0]
-    cdef c128 s = 0.0 + 0.0j
-    for i in range(n):
-        s += a[i].conjugate() * b[i]
-    return s
+    cdef int n = a.shape[0]
+    cdef int inc = 1
+    return blas.zdotc(&n, &a[0], &inc, &b[0], &inc)
 
 
 cdef inline double _vnorm(c128[::1] a) noexcept:
-    cdef Py_ssize_t i, n = a.shape[0]
-    cdef double s = 0.0
-    for i in range(n):
-        s += (a[i].real * a[i].real + a[i].imag * a[i].imag)
-    return sqrt(s)
+    cdef int n = a.shape[0]
+    cdef int inc = 1
+    return blas.dznrm2(&n, &a[0], &inc)
 
 
-cdef inline double _coeff_diff_norm(c128[::1] a, c128[::1] b) noexcept:
-    cdef Py_ssize_t i, n = a.shape[0]
+cdef inline double _coeff_diff_norm(c128[::1] a, c128[::1] b, int n) noexcept:
+    cdef Py_ssize_t i
     cdef double s = 0.0
     cdef c128 d
     for i in range(n):
@@ -222,9 +218,9 @@ cdef class CythonLanczosPropagator:
 
         n = phia_v.shape[1]
         vec_n = n
+        incx = incy = one = 1
         if not self.is_csr:
             m = ncol = lda = n
-            incx = incy = one = 1
             trans = 'N'
             alpha_blas = 1.0 + 0.0j
             beta_blas = 0.0 + 0.0j
@@ -253,32 +249,17 @@ cdef class CythonLanczosPropagator:
             dotpr = prefacs_v[step - 1] * prefacs_v[step] * _vdot(phia_v[step - 1], phia_v[step])
             alpha_v[step - 1] = dotpr.real
 
-            s = alpha_v[step - 1] * prefacs_v[step - 1] / prefacs_v[step]
-            if not self.is_csr:
-                s = -s
-                blas.zaxpy(&vec_n, &s, &phia_v[step - 1, 0], &incx, &phia_v[step, 0], &incy)
-            else:
-                for jj in range(n):
-                    phia_v[step, jj] -= s * phia_v[step - 1, jj]
+            s = -alpha_v[step - 1] * prefacs_v[step - 1] / prefacs_v[step]
+            blas.zaxpy(&vec_n, &s, &phia_v[step - 1, 0], &incx, &phia_v[step, 0], &incy)
 
             if fabs(phinorm * phinorm - alpha_v[step - 1] * alpha_v[step - 1]) < 0.1:
                 dotpr = prefacs_v[step - 1] * prefacs_v[step] * _vdot(phia_v[step - 1], phia_v[step])
-                s = dotpr * prefacs_v[step - 1] / prefacs_v[step]
-                if not self.is_csr:
-                    s = -s
-                    blas.zaxpy(&vec_n, &s, &phia_v[step - 1, 0], &incx, &phia_v[step, 0], &incy)
-                else:
-                    for jj in range(n):
-                        phia_v[step, jj] -= s * phia_v[step - 1, jj]
+                s = -dotpr * prefacs_v[step - 1] / prefacs_v[step]
+                blas.zaxpy(&vec_n, &s, &phia_v[step - 1, 0], &incx, &phia_v[step, 0], &incy)
 
             if step >= 2:
-                s = beta_v[step - 1] * prefacs_v[step - 2] / prefacs_v[step]
-                if not self.is_csr:
-                    s = -s
-                    blas.zaxpy(&vec_n, &s, &phia_v[step - 2, 0], &incx, &phia_v[step, 0], &incy)
-                else:
-                    for jj in range(n):
-                        phia_v[step, jj] -= s * phia_v[step - 2, jj]
+                s = -beta_v[step - 1] * prefacs_v[step - 2] / prefacs_v[step]
+                blas.zaxpy(&vec_n, &s, &phia_v[step - 2, 0], &incx, &phia_v[step, 0], &incy)
 
             phinorm = _vnorm(phia_v[step])
             beta_v[step] = prefacs_v[step] * phinorm
@@ -286,11 +267,7 @@ cdef class CythonLanczosPropagator:
 
             if fabs(log10(prefacs_v[step])) > 4.0:
                 s = prefacs_v[step]
-                if not self.is_csr:
-                    blas.zscal(&vec_n, &s, &phia_v[step, 0], &incx)
-                else:
-                    for jj in range(n):
-                        phia_v[step, jj] *= s
+                blas.zscal(&vec_n, &s, &phia_v[step, 0], &incx)
                 prefacs_v[step] = 1.0
             if self.profile_enabled:
                 self.profile_update += time.perf_counter() - t0
@@ -302,7 +279,7 @@ cdef class CythonLanczosPropagator:
             if self.profile_enabled:
                 self.profile_coeff += time.perf_counter() - t0
                 self.profile_coeff_calls += 1
-            convg = _coeff_diff_norm(curr_v, prev_v)
+            convg = _coeff_diff_norm(curr_v, prev_v, step + 1)
             if (not self.do_full_order) and convg < self.target_convg:
                 break
 
@@ -318,23 +295,15 @@ cdef class CythonLanczosPropagator:
             if self.profile_enabled:
                 self.profile_coeff += time.perf_counter() - t0
                 self.profile_coeff_calls += 2
-            convg = _coeff_diff_norm(curr_v, prev_v)
+            convg = _coeff_diff_norm(curr_v, prev_v, step + 1)
 
         if self.profile_enabled:
             t0 = time.perf_counter()
         s = curr_v[0]
-        if not self.is_csr:
-            blas.zscal(&vec_n, &s, &phia_v[0, 0], &incx)
-        else:
-            for jj in range(n):
-                phia_v[0, jj] *= s
+        blas.zscal(&vec_n, &s, &phia_v[0, 0], &incx)
         for ii in range(1, step + 1):
             s = curr_v[ii] * prefacs_v[ii] / prefacs_v[0]
-            if not self.is_csr:
-                blas.zaxpy(&vec_n, &s, &phia_v[ii, 0], &incx, &phia_v[0, 0], &incy)
-            else:
-                for jj in range(n):
-                    phia_v[0, jj] += s * phia_v[ii, jj]
+            blas.zaxpy(&vec_n, &s, &phia_v[ii, 0], &incx, &phia_v[0, 0], &incy)
         if self.profile_enabled:
             self.profile_reconstruct += time.perf_counter() - t0
 
