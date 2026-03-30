@@ -1,0 +1,425 @@
+# cython: language_level=3
+# cython: boundscheck=False
+# cython: wraparound=False
+# cython: initializedcheck=False
+
+import numpy as np
+import time
+cimport numpy as cnp
+from libc.math cimport sqrt, log10, fabs, pow
+from scipy import sparse as sp
+from scipy.linalg import eigh_tridiagonal
+cimport scipy.linalg.cython_blas as blas
+from qutip.core.data.csr cimport CSR as QCSR
+from qutip.core.data.dense cimport Dense as QDense, fast_from_numpy as qd_fast_from_numpy, empty as qd_dense_empty
+from qutip.core.data.matmul cimport matmul_csr_dense_dense as qd_matmul_csr_dense_dense
+
+cdef extern from "Accelerate/Accelerate.h":
+    ctypedef enum CBLAS_ORDER:
+        CblasRowMajor
+        CblasColMajor
+    ctypedef enum CBLAS_TRANSPOSE:
+        CblasNoTrans
+        CblasTrans
+        CblasConjTrans
+    void cblas_zgemv(CBLAS_ORDER Order,
+                     CBLAS_TRANSPOSE TransA,
+                     int M,
+                     int N,
+                     const void *alpha,
+                     const void *A,
+                     int lda,
+                     const void *X,
+                     int incX,
+                     const void *beta,
+                     void *Y,
+                     int incY)
+
+ctypedef cnp.complex128_t c128
+ctypedef cnp.float64_t f64
+ctypedef cnp.int64_t i64
+
+
+cdef inline c128 _vdot(c128[::1] a, c128[::1] b) noexcept:
+    cdef Py_ssize_t i, n = a.shape[0]
+    cdef c128 s = 0.0 + 0.0j
+    for i in range(n):
+        s += a[i].conjugate() * b[i]
+    return s
+
+
+cdef inline double _vnorm(c128[::1] a) noexcept:
+    cdef Py_ssize_t i, n = a.shape[0]
+    cdef double s = 0.0
+    for i in range(n):
+        s += (a[i].real * a[i].real + a[i].imag * a[i].imag)
+    return sqrt(s)
+
+
+cdef inline double _coeff_diff_norm(c128[::1] a, c128[::1] b) noexcept:
+    cdef Py_ssize_t i, n = a.shape[0]
+    cdef double s = 0.0
+    cdef c128 d
+    for i in range(n):
+        d = a[i] - b[i]
+        s += (d.real * d.real + d.imag * d.imag)
+    return sqrt(s)
+
+
+cdef void _csr_matvec(c128[::1] data, i64[::1] indices, i64[::1] indptr, c128[::1] x, c128[::1] y) noexcept:
+    cdef Py_ssize_t i, jj, start, stop, nrows = indptr.shape[0] - 1
+    cdef c128 acc
+    for i in range(nrows):
+        start = indptr[i]
+        stop = indptr[i + 1]
+        acc = 0.0 + 0.0j
+        for jj in range(start, stop):
+            acc += data[jj] * x[indices[jj]]
+        y[i] = acc
+
+
+cdef void _calc_coeff(cnp.ndarray[f64, ndim=1] alpha,
+                      cnp.ndarray[f64, ndim=1] beta,
+                      int step,
+                      double HT,
+                      cnp.ndarray[c128, ndim=1] coeff) except *:
+    cdef cnp.ndarray[f64, ndim=1] vals
+    cdef cnp.ndarray[f64, ndim=2] vecs
+    cdef cnp.ndarray[c128, ndim=1] phases
+    cdef int i, j
+
+    vals, vecs = eigh_tridiagonal(alpha[:step].copy(), beta[1:step].copy())
+    phases = np.exp(-1j * HT * vals)
+    coeff[:] = 0.0
+    for j in range(step):
+        for i in range(step):
+            coeff[j] += vecs[j, i] * vecs[0, i] * phases[i]
+
+
+cdef class CythonLanczosPropagator:
+    cdef int maxsteps
+    cdef double target_convg
+    cdef int debug
+    cdef bint do_full_order
+    cdef bint is_csr
+    cdef bint is_qutip_data
+    cdef bint profile_enabled
+    cdef bint use_accelerate_cblas
+    cdef bint use_numpy_matmul
+    cdef bint use_numpy_dot
+    cdef int dim
+
+    cdef object H_dense
+    cdef object H_data
+    cdef object H_indices
+    cdef object H_indptr
+
+    cdef object alpha
+    cdef object beta
+    cdef object prefacs
+    cdef object curr_coeff
+    cdef object prev_coeff
+    cdef object phia
+    cdef object phia_rows
+    cdef QCSR qutip_csr
+    cdef QDense qutip_x_dense
+    cdef QDense qutip_y_dense
+    cdef object qutip_x_col
+    cdef object timer
+    cdef double profile_total
+    cdef double profile_matvec
+    cdef double profile_update
+    cdef double profile_coeff
+    cdef double profile_reconstruct
+    cdef Py_ssize_t profile_step_calls
+    cdef Py_ssize_t profile_coeff_calls
+
+    def __cinit__(self, H, int maxsteps, double target_convg, int debug=0, bint do_full_order=False, bint profile_enabled=False):
+        self.maxsteps = maxsteps
+        self.target_convg = target_convg
+        self.debug = debug
+        self.do_full_order = do_full_order
+        cdef str dense_backend = "numpy_matmul"
+
+        self.profile_enabled = profile_enabled
+        self.use_accelerate_cblas = dense_backend in ("accelerate", "accelerate_cblas", "cblas")
+        self.use_numpy_matmul = dense_backend in ("numpy", "numpy_matmul", "matmul")
+        self.use_numpy_dot = dense_backend in ("numpy_dot", "dot")
+        self.timer = time.perf_counter if profile_enabled else None
+        self.profile_total = 0.0
+        self.profile_matvec = 0.0
+        self.profile_update = 0.0
+        self.profile_coeff = 0.0
+        self.profile_reconstruct = 0.0
+        self.profile_step_calls = 0
+        self.profile_coeff_calls = 0
+
+        self.is_qutip_data = False
+
+        if hasattr(H, "as_scipy") and H.__class__.__module__.startswith("qutip.core.data."):
+            self.is_csr = False
+            self.is_qutip_data = True
+            self.qutip_csr = <QCSR>H
+            self.dim = H.shape[0]
+            self.qutip_x_col = np.empty((self.dim, 1), dtype=np.complex128, order="F")
+            self.qutip_x_dense = qd_fast_from_numpy(self.qutip_x_col)
+            self.qutip_y_dense = qd_dense_empty(self.dim, 1, True)
+        elif sp.isspmatrix_csr(H) or (hasattr(sp, "csr_array") and isinstance(H, sp.csr_array)):
+            H = H.tocsr()
+            self.is_csr = True
+            self.dim = H.shape[0]
+            self.H_data = np.asarray(H.data, dtype=np.complex128)
+            self.H_indices = np.asarray(H.indices, dtype=np.int64)
+            self.H_indptr = np.asarray(H.indptr, dtype=np.int64)
+        else:
+            self.is_csr = False
+            self.dim = np.asarray(H).shape[0]
+            if self.use_numpy_matmul or self.use_numpy_dot:
+                self.H_dense = np.ascontiguousarray(H, dtype=np.complex128)
+            else:
+                self.H_dense = np.asfortranarray(H, dtype=np.complex128)
+
+        self.alpha = np.zeros(maxsteps + 1, dtype=np.float64)
+        self.beta = np.zeros(maxsteps + 1, dtype=np.float64)
+        self.prefacs = np.zeros(maxsteps + 1, dtype=np.float64)
+        self.curr_coeff = np.zeros(maxsteps + 1, dtype=np.complex128)
+        self.prev_coeff = np.zeros(maxsteps + 1, dtype=np.complex128)
+
+    cpdef list propagate(self, cnp.ndarray[c128, ndim=1] phi0, cnp.ndarray[f64, ndim=1] ts, object maxHT=None):
+        cdef int n = phi0.shape[0]
+        cdef double tt, tf, HT, HT_done
+        cdef double t0
+        cdef list out = []
+
+        if self.dim != n:
+            raise ValueError("State dimension does not match Hamiltonian dimension")
+
+        if self.profile_enabled:
+            t0 = self.timer()
+
+        self.phia = np.empty((self.maxsteps + 1, n), dtype=np.complex128)
+        self.phia[:] = phi0
+        self.phia_rows = [self.phia[ii, :] for ii in range(self.maxsteps + 1)]
+
+        tt = ts[0]
+        out.append(np.asarray(self.phia[0]).copy())
+
+        for tf in ts[1:]:
+            while tt < tf:
+                HT = tf - tt
+                if maxHT is not None and HT > maxHT:
+                    HT = maxHT
+                HT_done = self._step(HT)
+                tt += HT_done
+            out.append(np.asarray(self.phia[0]).copy())
+
+        if self.profile_enabled:
+            self.profile_total += self.timer() - t0
+
+        return out
+
+    cdef double _step(self, double HT):
+        cdef int step, ii, jj, n
+        cdef double HT_done = HT
+        cdef double phinorm, convg, scale
+        cdef double t0
+        cdef c128 dotpr
+        cdef c128 s
+        cdef c128 alpha_blas, beta_blas
+        cdef c128 alpha_cblas, beta_cblas
+        cdef int incx, incy, lda, m, ncol, vec_n
+        cdef char trans
+        cdef c128 *qx_ptr
+        cdef c128 *qy_ptr
+
+        cdef c128[:, ::1] phia_v = self.phia
+        cdef cnp.ndarray[c128, ndim=2, mode='fortran'] H_dense_f
+        cdef c128[:, ::1] qx_v
+        cdef c128[:, ::1] qy_v
+        cdef f64[::1] alpha_v = self.alpha
+        cdef f64[::1] beta_v = self.beta
+        cdef f64[::1] prefacs_v = self.prefacs
+        cdef c128[::1] curr_v = self.curr_coeff
+        cdef c128[::1] prev_v = self.prev_coeff
+
+        n = phia_v.shape[1]
+        vec_n = n
+        if (not self.is_csr) and (not self.is_qutip_data):
+            m = n
+            ncol = n
+            incx = 1
+            incy = 1
+            if not (self.use_numpy_matmul or self.use_numpy_dot):
+                H_dense_f = self.H_dense
+                trans = 'N'
+                lda = n
+                alpha_blas = 1.0 + 0.0j
+                beta_blas = 0.0 + 0.0j
+                alpha_cblas = 1.0 + 0.0j
+                beta_cblas = 0.0 + 0.0j
+        elif self.is_qutip_data:
+            qx_v = self.qutip_x_col
+            qx_ptr = self.qutip_x_dense.data
+            qy_ptr = self.qutip_y_dense.data
+            qy_v = self.qutip_x_col
+
+        phinorm = _vnorm(phia_v[0])
+        prefacs_v[0] = 1.0 / phinorm
+        self.profile_step_calls += 1
+        for ii in range(self.maxsteps + 1):
+            curr_v[ii] = 0.0 + 0.0j
+
+        for step in range(1, self.maxsteps + 1):
+            if self.profile_enabled:
+                t0 = self.timer()
+            if self.is_csr:
+                _csr_matvec(self.H_data, self.H_indices, self.H_indptr, phia_v[step - 1], phia_v[step])
+            elif self.is_qutip_data:
+                for jj in range(n):
+                    qx_ptr[jj] = phia_v[step - 1, jj]
+                    qy_ptr[jj] = 0.0 + 0.0j
+                qd_matmul_csr_dense_dense(self.qutip_csr, self.qutip_x_dense, 1.0 + 0.0j, self.qutip_y_dense)
+                for jj in range(n):
+                    phia_v[step, jj] = qy_ptr[jj]
+            else:
+                if self.use_numpy_matmul:
+                    self.phia_rows[step][:] = self.H_dense @ self.phia_rows[step - 1]
+                elif self.use_numpy_dot:
+                    self.phia_rows[step][:] = self.H_dense.dot(self.phia_rows[step - 1])
+                elif self.use_accelerate_cblas:
+                    cblas_zgemv(CblasColMajor,
+                                CblasNoTrans,
+                                m,
+                                ncol,
+                                <const void *>&alpha_cblas,
+                                <const void *>&H_dense_f[0, 0],
+                                lda,
+                                <const void *>&phia_v[step - 1, 0],
+                                incx,
+                                <const void *>&beta_cblas,
+                                <void *>&phia_v[step, 0],
+                                incy)
+                else:
+                    blas.zgemv(&trans, &m, &ncol, &alpha_blas, &H_dense_f[0, 0], &lda, &phia_v[step - 1, 0], &incx, &beta_blas, &phia_v[step, 0], &incy)
+            if self.profile_enabled:
+                self.profile_matvec += self.timer() - t0
+
+            if self.profile_enabled:
+                t0 = self.timer()
+            prefacs_v[step] = prefacs_v[step - 1]
+            phinorm = prefacs_v[step] * _vnorm(phia_v[step])
+
+            dotpr = prefacs_v[step - 1] * prefacs_v[step] * _vdot(phia_v[step - 1], phia_v[step])
+            alpha_v[step - 1] = dotpr.real
+
+            s = alpha_v[step - 1] * prefacs_v[step - 1] / prefacs_v[step]
+            if (not self.is_csr) and (not self.is_qutip_data):
+                s = -s
+                blas.zaxpy(&vec_n, &s, &phia_v[step - 1, 0], &incx, &phia_v[step, 0], &incy)
+            else:
+                for jj in range(n):
+                    phia_v[step, jj] -= s * phia_v[step - 1, jj]
+
+            if fabs(phinorm * phinorm - alpha_v[step - 1] * alpha_v[step - 1]) < 0.1:
+                dotpr = prefacs_v[step - 1] * prefacs_v[step] * _vdot(phia_v[step - 1], phia_v[step])
+                s = dotpr * prefacs_v[step - 1] / prefacs_v[step]
+                if (not self.is_csr) and (not self.is_qutip_data):
+                    s = -s
+                    blas.zaxpy(&vec_n, &s, &phia_v[step - 1, 0], &incx, &phia_v[step, 0], &incy)
+                else:
+                    for jj in range(n):
+                        phia_v[step, jj] -= s * phia_v[step - 1, jj]
+
+            if step >= 2:
+                s = beta_v[step - 1] * prefacs_v[step - 2] / prefacs_v[step]
+                if (not self.is_csr) and (not self.is_qutip_data):
+                    s = -s
+                    blas.zaxpy(&vec_n, &s, &phia_v[step - 2, 0], &incx, &phia_v[step, 0], &incy)
+                else:
+                    for jj in range(n):
+                        phia_v[step, jj] -= s * phia_v[step - 2, jj]
+
+            phinorm = _vnorm(phia_v[step])
+            beta_v[step] = prefacs_v[step] * phinorm
+            prefacs_v[step] = 1.0 / phinorm
+
+            if fabs(log10(prefacs_v[step])) > 4.0:
+                s = prefacs_v[step]
+                if (not self.is_csr) and (not self.is_qutip_data):
+                    blas.zscal(&vec_n, &s, &phia_v[step, 0], &incx)
+                else:
+                    for jj in range(n):
+                        phia_v[step, jj] *= s
+                prefacs_v[step] = 1.0
+            if self.profile_enabled:
+                self.profile_update += self.timer() - t0
+
+            self.prev_coeff[:] = self.curr_coeff
+            if self.profile_enabled:
+                t0 = self.timer()
+            _calc_coeff(self.alpha, self.beta, step, HT_done, self.curr_coeff)
+            if self.profile_enabled:
+                self.profile_coeff += self.timer() - t0
+                self.profile_coeff_calls += 1
+            convg = _coeff_diff_norm(curr_v, prev_v)
+            if (not self.do_full_order) and convg < self.target_convg:
+                break
+
+        while convg > self.target_convg:
+            scale = 0.95 * pow(self.target_convg / convg, 1.0 / step)
+            if scale < 0.5:
+                scale = 0.5
+            HT_done = HT_done * scale
+            if self.profile_enabled:
+                t0 = self.timer()
+            _calc_coeff(self.alpha, self.beta, step - 1, HT_done, self.prev_coeff)
+            _calc_coeff(self.alpha, self.beta, step, HT_done, self.curr_coeff)
+            if self.profile_enabled:
+                self.profile_coeff += self.timer() - t0
+                self.profile_coeff_calls += 2
+            convg = _coeff_diff_norm(curr_v, prev_v)
+
+        if self.profile_enabled:
+            t0 = self.timer()
+        s = curr_v[0]
+        if (not self.is_csr) and (not self.is_qutip_data):
+            blas.zscal(&vec_n, &s, &phia_v[0, 0], &incx)
+        else:
+            for jj in range(n):
+                phia_v[0, jj] *= s
+        for ii in range(1, step + 1):
+            s = curr_v[ii] * prefacs_v[ii] / prefacs_v[0]
+            if (not self.is_csr) and (not self.is_qutip_data):
+                blas.zaxpy(&vec_n, &s, &phia_v[ii, 0], &incx, &phia_v[0, 0], &incy)
+            else:
+                for jj in range(n):
+                    phia_v[0, jj] += s * phia_v[ii, jj]
+        if self.profile_enabled:
+            self.profile_reconstruct += self.timer() - t0
+
+        return HT_done
+
+    cpdef dict get_profile_stats(self):
+        return {
+            "total": self.profile_total,
+            "matvec": self.profile_matvec,
+            "update": self.profile_update,
+            "coeff": self.profile_coeff,
+            "reconstruct": self.profile_reconstruct,
+            "step_calls": int(self.profile_step_calls),
+            "coeff_calls": int(self.profile_coeff_calls),
+            "dense_matvec_backend": "numpy_matmul" if self.use_numpy_matmul else ("numpy_dot" if self.use_numpy_dot else ("accelerate_cblas" if self.use_accelerate_cblas else "scipy_blas")),
+        }
+
+
+def sesolve_lanczos_cython(H,
+                           cnp.ndarray[c128, ndim=1] phi0,
+                           cnp.ndarray[f64, ndim=1] ts,
+                           int maxsteps,
+                           double target_convg,
+                           object maxHT=None,
+                           int debug=0,
+                           bint do_full_order=False,
+                           bint profile_enabled=False):
+    cdef CythonLanczosPropagator prop = CythonLanczosPropagator(H, maxsteps, target_convg, debug, do_full_order, profile_enabled)
+    return prop.propagate(phi0, ts, maxHT)

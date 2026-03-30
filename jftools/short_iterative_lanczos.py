@@ -1,8 +1,20 @@
+import warnings
+
 import numpy as np
-from numpy import einsum, empty, zeros, vdot, log10, exp
+from numpy import einsum, empty, exp, log10, vdot, zeros
 from numpy.linalg import norm
 from scipy.linalg import eig_banded
-import warnings
+from scipy import sparse as sp
+
+from .myjit import jit
+
+try:
+    from . import short_iterative_lanczos_cython as _sil_cython
+
+    have_cython_backend = True
+except ImportError:
+    _sil_cython = None
+    have_cython_backend = False
 
 try:
     import qutip
@@ -10,7 +22,6 @@ try:
     have_qutip = True
 except ImportError:
     have_qutip = False
-
 
 class normdotndarray(np.ndarray):
     """extension of numpy array that supports interface for lanczos_timeprop"""
@@ -31,16 +42,175 @@ def calc_coeff(step, a_band, HT, coeff):
     return coeff
 
 
-class lanczos_timeprop:
+def _qobj_to_matrix(H):
+    data = H.data
+    if hasattr(data, "as_scipy"):
+        return data.as_scipy()
+    return data
+
+
+def _matvec(H, phi):
+    if hasattr(H, "dot"):
+        return H.dot(phi)
+    return H @ phi
+
+
+def _qobj_state_io(phi0):
+    outdims = phi0.dims
+    outshape = phi0.full().shape
+
+    def get_phi_out(x):
+        arr = np.asarray(x).reshape(outshape)
+        return qutip.Qobj(arr, dims=outdims)
+
+    phi0_arr = np.asarray(phi0.full()).reshape(-1)
+    return phi0_arr, get_phi_out
+
+
+@jit(nopython=True, cache=True)
+def _dense_lanczos_iteration(H, phia, alpha, beta, prefacs, step):
+    phia[step, :] = H.dot(phia[step - 1, :])
+    prefacs[step] = prefacs[step - 1]
+    phinorm = prefacs[step] * np.linalg.norm(phia[step, :])
+
+    dotpr = prefacs[step - 1] * prefacs[step] * np.vdot(phia[step - 1, :], phia[step, :])
+    alpha[step - 1] = dotpr.real
+
+    phia[step, :] -= alpha[step - 1] * prefacs[step - 1] / prefacs[step] * phia[step - 1, :]
+
+    if abs(phinorm**2 - alpha[step - 1] ** 2) < 0.1:
+        dotpr = prefacs[step - 1] * prefacs[step] * np.vdot(phia[step - 1, :], phia[step, :])
+        phia[step, :] -= dotpr * prefacs[step - 1] / prefacs[step] * phia[step - 1, :]
+
+    if step >= 2:
+        phia[step, :] -= beta[step - 1] * prefacs[step - 2] / prefacs[step] * phia[step - 2, :]
+
+    phinorm = np.linalg.norm(phia[step, :])
+    beta[step] = prefacs[step] * phinorm
+    prefacs[step] = 1.0 / phinorm
+    if abs(np.log10(prefacs[step])) > 4.0:
+        phia[step, :] *= prefacs[step]
+        prefacs[step] = 1.0
+
+    return dotpr.imag, beta[step]
+
+
+# Python-callable (non-JIT) version for numba backends to use optimized kernels
+def _dense_lanczos_iteration_python(H, phia, alpha, beta, prefacs, step):
+    """Dense Lanczos iteration using Python-level H.dot() call (optimized NumPy kernel)."""
+    phia[step, :] = H.dot(phia[step - 1, :])  # Calls optimized NumPy/BLAS kernel
+    prefacs[step] = prefacs[step - 1]
+    phinorm = prefacs[step] * np.linalg.norm(phia[step, :])
+
+    dotpr = prefacs[step - 1] * prefacs[step] * np.vdot(phia[step - 1, :], phia[step, :])
+    alpha[step - 1] = dotpr.real
+
+    phia[step, :] -= alpha[step - 1] * prefacs[step - 1] / prefacs[step] * phia[step - 1, :]
+
+    if abs(phinorm**2 - alpha[step - 1] ** 2) < 0.1:
+        dotpr = prefacs[step - 1] * prefacs[step] * np.vdot(phia[step - 1, :], phia[step, :])
+        phia[step, :] -= dotpr * prefacs[step - 1] / prefacs[step] * phia[step - 1, :]
+
+    if step >= 2:
+        phia[step, :] -= beta[step - 1] * prefacs[step - 2] / prefacs[step] * phia[step - 2, :]
+
+    phinorm = np.linalg.norm(phia[step, :])
+    beta[step] = prefacs[step] * phinorm
+    prefacs[step] = 1.0 / phinorm
+    if abs(np.log10(prefacs[step])) > 4.0:
+        phia[step, :] *= prefacs[step]
+        prefacs[step] = 1.0
+
+    return dotpr.imag, beta[step]
+
+
+@jit(nopython=True, cache=True)
+def _csr_matvec(data, indices, indptr, x, y):
+    nrows = indptr.size - 1
+    for i in range(nrows):
+        start = indptr[i]
+        stop = indptr[i + 1]
+        acc = 0.0 + 0.0j
+        for jj in range(start, stop):
+            acc += data[jj] * x[indices[jj]]
+        y[i] = acc
+
+
+@jit(nopython=True, cache=True)
+def _csr_lanczos_iteration(data, indices, indptr, phia, alpha, beta, prefacs, step):
+    _csr_matvec(data, indices, indptr, phia[step - 1, :], phia[step, :])
+    prefacs[step] = prefacs[step - 1]
+    phinorm = prefacs[step] * np.linalg.norm(phia[step, :])
+
+    dotpr = prefacs[step - 1] * prefacs[step] * np.vdot(phia[step - 1, :], phia[step, :])
+    alpha[step - 1] = dotpr.real
+
+    phia[step, :] -= alpha[step - 1] * prefacs[step - 1] / prefacs[step] * phia[step - 1, :]
+
+    if abs(phinorm**2 - alpha[step - 1] ** 2) < 0.1:
+        dotpr = prefacs[step - 1] * prefacs[step] * np.vdot(phia[step - 1, :], phia[step, :])
+        phia[step, :] -= dotpr * prefacs[step - 1] / prefacs[step] * phia[step - 1, :]
+
+    if step >= 2:
+        phia[step, :] -= beta[step - 1] * prefacs[step - 2] / prefacs[step] * phia[step - 2, :]
+
+    phinorm = np.linalg.norm(phia[step, :])
+    beta[step] = prefacs[step] * phinorm
+    prefacs[step] = 1.0 / phinorm
+    if abs(np.log10(prefacs[step])) > 4.0:
+        phia[step, :] *= prefacs[step]
+        prefacs[step] = 1.0
+
+    return dotpr.imag, beta[step]
+
+
+# Python-callable (non-JIT) version for numba backends to use optimized kernels
+def _csr_lanczos_iteration_python(H, phia, alpha, beta, prefacs, step):
+    """Sparse CSR Lanczos iteration using Python-level H.dot() call (optimized scipy kernel)."""
+    phia[step, :] = H.dot(phia[step - 1, :])  # Calls optimized SciPy sparse kernel
+    prefacs[step] = prefacs[step - 1]
+    phinorm = prefacs[step] * np.linalg.norm(phia[step, :])
+
+    dotpr = prefacs[step - 1] * prefacs[step] * np.vdot(phia[step - 1, :], phia[step, :])
+    alpha[step - 1] = dotpr.real
+
+    phia[step, :] -= alpha[step - 1] * prefacs[step - 1] / prefacs[step] * phia[step - 1, :]
+
+    if abs(phinorm**2 - alpha[step - 1] ** 2) < 0.1:
+        dotpr = prefacs[step - 1] * prefacs[step] * np.vdot(phia[step - 1, :], phia[step, :])
+        phia[step, :] -= dotpr * prefacs[step - 1] / prefacs[step] * phia[step - 1, :]
+
+    if step >= 2:
+        phia[step, :] -= beta[step - 1] * prefacs[step - 2] / prefacs[step] * phia[step - 2, :]
+
+    phinorm = np.linalg.norm(phia[step, :])
+    beta[step] = prefacs[step] * phinorm
+    prefacs[step] = 1.0 / phinorm
+    if abs(np.log10(prefacs[step])) > 4.0:
+        phia[step, :] *= prefacs[step]
+        prefacs[step] = 1.0
+
+    return dotpr.imag, beta[step]
+
+
+@jit(nopython=True, cache=True)
+def _reconstruct_state(phia, curr_coeff, prefacs, step):
+    phia[0, :] *= curr_coeff[0]
+    inv_prefac0 = 1.0 / prefacs[0]
+    for ii in range(1, step + 1):
+        phia[0, :] += curr_coeff[ii] * prefacs[ii] * inv_prefac0 * phia[ii, :]
+
+
+class _lanczos_timeprop_reference:
     def __init__(self, H, maxsteps, target_convg, debug=0, do_full_order=False):
         if have_qutip and isinstance(H, qutip.Qobj):
-            H = H.data
+            H = _qobj_to_matrix(H)
 
         if not callable(H):
             # time-independent operator
-            # assume it supports .dot for matrix-vector multiplication
+            # assume it supports dot or matmul for matrix-vector multiplication
             def Hfun(t, phi, Hphi):
-                Hphi[:] = H.dot(phi)
+                Hphi[:] = _matvec(H, phi)
                 return Hphi
 
             self.Hfun = Hfun
@@ -59,33 +229,16 @@ class lanczos_timeprop:
         self.prev_coeff = self.curr_coeff.copy()
 
     def propagate(self, phi0, ts, maxHT=None):
-        ts = np.asarray(ts)
         assert ts.ndim == 1, "ts must be a 1d array"
 
-        def get_phi_out(x):
-            return x.copy()
-
-        if isinstance(phi0, np.ndarray):
-
-            def get_phi_out(x):
-                return x.view(np.ndarray).copy()
-
-            phi0 = phi0.view(normdotndarray)
-        elif have_qutip and isinstance(phi0, qutip.Qobj):
-            outdims = phi0.dims.copy()
-            outtype = phi0.type
-
-            def get_phi_out(x):
-                return qutip.Qobj(x, dims=outdims, type=outtype)
-
-            phi0 = phi0.full().view(normdotndarray)
+        phi0 = np.asarray(phi0).view(normdotndarray)
 
         self.phia = [phi0.copy() for _ in range(self.maxsteps + 1)]
 
         ids = np.array([id(x) for x in self.phia])
 
         tt = ts[0]
-        phis = [get_phi_out(phi0)]
+        phis = [phi0.view(np.ndarray).copy()]
         for tf in ts[1:]:
             while tt < tf:
                 HT = tf - tt
@@ -93,7 +246,7 @@ class lanczos_timeprop:
                     HT = min(HT, maxHT)
                 HT_done = self._step(tt, HT)
                 tt += HT_done
-            phis.append(get_phi_out(self.phia[0]))
+            phis.append(self.phia[0].view(np.ndarray).copy())
 
         if not np.all(ids == np.array([id(x) for x in self.phia])):
             warnings.warn("self.phia have not been updated in-place!")
@@ -227,6 +380,323 @@ class lanczos_timeprop:
         return HT_done
 
 
-def sesolve_lanczos(H, phi0, ts, maxsteps, target_convg, maxHT=None, debug=0, do_full_order=False):
-    prop = lanczos_timeprop(H, maxsteps, target_convg, debug, do_full_order)
+class _lanczos_timeprop_numba_dense:
+    def __init__(self, H, maxsteps, target_convg, debug=0, do_full_order=False):
+        self.H = np.asarray(H, dtype=np.complex128)
+        self.maxsteps = maxsteps
+        self.target_convg = target_convg
+        self.prefacs = empty(maxsteps + 1)
+        self.a_band = empty((2, maxsteps + 1))
+        self.debug = debug
+        self.do_full_order = do_full_order
+        self.curr_coeff = zeros(maxsteps + 1, dtype=complex)
+        self.prev_coeff = self.curr_coeff.copy()
+
+    def propagate(self, phi0, ts, maxHT=None):
+        assert ts.ndim == 1, "ts must be a 1d array"
+
+        phi0_arr = np.asarray(phi0)
+
+        dtype = np.result_type(phi0_arr.dtype, self.H.dtype, np.complex128)
+        self.phia = np.empty((self.maxsteps + 1, phi0_arr.size), dtype=dtype)
+        for ii in range(self.maxsteps + 1):
+            self.phia[ii, :] = phi0_arr
+
+        tt = ts[0]
+        phis = [self.phia[0, :].copy()]
+        for tf in ts[1:]:
+            while tt < tf:
+                HT = tf - tt
+                if maxHT is not None:
+                    HT = min(HT, maxHT)
+                HT_done = self._step(tt, HT)
+                tt += HT_done
+            phis.append(self.phia[0, :].copy())
+
+        return phis
+
+    def _step(self, t, HT):
+        del t
+
+        beta, alpha = self.a_band
+        phia = self.phia
+        prefacs = self.prefacs
+        curr_coeff = self.curr_coeff
+        prev_coeff = self.prev_coeff
+        debug = self.debug
+
+        HT_done = HT
+
+        phinorm = norm(phia[0, :])
+        prefacs[0] = 1.0 / phinorm
+        curr_coeff[:] = 0.0
+
+        for step in range(1, self.maxsteps + 1):
+            dotpr_imag, beta_step = _dense_lanczos_iteration_python(self.H, phia, alpha, beta, prefacs, step)
+            if abs(dotpr_imag) > 1e-9 and debug > 3:
+                print("imaginary part of dotpr !=0:", dotpr_imag)
+            if abs(beta_step) < 1e-2 and debug > 2:
+                print("WARNING! beta[%d]=%g is very small - there seems to be a linearly dependent vector!" % (step, beta_step))
+
+            if debug > 1:
+                for ii in range(step):
+                    dotpr = prefacs[ii] * prefacs[step] * np.vdot(phia[ii, :], phia[step, :])
+                if abs(dotpr) > 1e-12:
+                    print("WARNING! vectors not orthogonal. dotpr(%d,%d) = %g" % (ii, step, dotpr))
+
+            prev_coeff[:] = curr_coeff[:]
+            calc_coeff(step, self.a_band, HT_done, curr_coeff)
+            convg = norm(curr_coeff - prev_coeff)
+            if debug > 6:
+                print("prev_coeff:", prev_coeff)
+            if debug > 6:
+                print("curr_coeff:", curr_coeff)
+            if debug > 5:
+                print("convg:", convg)
+
+            if not self.do_full_order and convg < self.target_convg:
+                break
+
+        if debug > 8:
+            print(alpha[0:step])
+            print(beta[1:step])
+
+        while convg > self.target_convg:
+            scale = 0.95 * (self.target_convg / convg) ** (1.0 / step)
+            scale = max(0.5, scale)
+            if debug > 3:
+                print("scales HT with scale =", scale)
+            HT_done = HT_done * scale
+            calc_coeff(step - 1, self.a_band, HT_done, prev_coeff)
+            calc_coeff(step, self.a_band, HT_done, curr_coeff)
+            convg = norm(curr_coeff - prev_coeff)
+            if debug > 6:
+                print("prev_coeff:", abs(prev_coeff) ** 2)
+            if debug > 6:
+                print("curr_coeff:", abs(curr_coeff) ** 2)
+            if debug > 5:
+                print("convg:", convg)
+
+        if debug > 6 and HT_done != HT:
+            print("did not converge in %d iterations, step size decreased from %g to %g" % (self.maxsteps, HT, HT_done))
+
+        _reconstruct_state(phia, curr_coeff, prefacs, step)
+        return HT_done
+
+
+class _lanczos_timeprop_numba_csr:
+    def __init__(self, H, maxsteps, target_convg, debug=0, do_full_order=False):
+        # Store the original sparse matrix for Python-level .dot() calls (uses optimized scipy kernels)
+        self.H = H if _is_csr_matrix(H) else H.tocsr()
+        self.maxsteps = maxsteps
+        self.target_convg = target_convg
+        self.prefacs = empty(maxsteps + 1)
+        self.a_band = empty((2, maxsteps + 1))
+        self.debug = debug
+        self.do_full_order = do_full_order
+        self.curr_coeff = zeros(maxsteps + 1, dtype=complex)
+        self.prev_coeff = self.curr_coeff.copy()
+
+    def propagate(self, phi0, ts, maxHT=None):
+        assert ts.ndim == 1, "ts must be a 1d array"
+
+        phi0_arr = np.asarray(phi0)
+
+        dtype = np.result_type(phi0_arr.dtype, np.complex128)
+        self.phia = np.empty((self.maxsteps + 1, phi0_arr.size), dtype=dtype)
+        for ii in range(self.maxsteps + 1):
+            self.phia[ii, :] = phi0_arr
+
+        tt = ts[0]
+        phis = [self.phia[0, :].copy()]
+        for tf in ts[1:]:
+            while tt < tf:
+                HT = tf - tt
+                if maxHT is not None:
+                    HT = min(HT, maxHT)
+                HT_done = self._step(tt, HT)
+                tt += HT_done
+            phis.append(self.phia[0, :].copy())
+
+        return phis
+
+    def _step(self, t, HT):
+        del t
+
+        beta, alpha = self.a_band
+        phia = self.phia
+        prefacs = self.prefacs
+        curr_coeff = self.curr_coeff
+        prev_coeff = self.prev_coeff
+        debug = self.debug
+
+        HT_done = HT
+
+        phinorm = norm(phia[0, :])
+        prefacs[0] = 1.0 / phinorm
+        curr_coeff[:] = 0.0
+
+        for step in range(1, self.maxsteps + 1):
+            dotpr_imag, beta_step = _csr_lanczos_iteration_python(self.H, phia, alpha, beta, prefacs, step)
+            if abs(dotpr_imag) > 1e-9 and debug > 3:
+                print("imaginary part of dotpr !=0:", dotpr_imag)
+            if abs(beta_step) < 1e-2 and debug > 2:
+                print("WARNING! beta[%d]=%g is very small - there seems to be a linearly dependent vector!" % (step, beta_step))
+
+            if debug > 1:
+                for ii in range(step):
+                    dotpr = prefacs[ii] * prefacs[step] * np.vdot(phia[ii, :], phia[step, :])
+                if abs(dotpr) > 1e-12:
+                    print("WARNING! vectors not orthogonal. dotpr(%d,%d) = %g" % (ii, step, dotpr))
+
+            prev_coeff[:] = curr_coeff[:]
+            calc_coeff(step, self.a_band, HT_done, curr_coeff)
+            convg = norm(curr_coeff - prev_coeff)
+            if debug > 6:
+                print("prev_coeff:", prev_coeff)
+            if debug > 6:
+                print("curr_coeff:", curr_coeff)
+            if debug > 5:
+                print("convg:", convg)
+
+            if not self.do_full_order and convg < self.target_convg:
+                break
+
+        if debug > 8:
+            print(alpha[0:step])
+            print(beta[1:step])
+
+        while convg > self.target_convg:
+            scale = 0.95 * (self.target_convg / convg) ** (1.0 / step)
+            scale = max(0.5, scale)
+            if debug > 3:
+                print("scales HT with scale =", scale)
+            HT_done = HT_done * scale
+            calc_coeff(step - 1, self.a_band, HT_done, prev_coeff)
+            calc_coeff(step, self.a_band, HT_done, curr_coeff)
+            convg = norm(curr_coeff - prev_coeff)
+            if debug > 6:
+                print("prev_coeff:", abs(prev_coeff) ** 2)
+            if debug > 6:
+                print("curr_coeff:", abs(curr_coeff) ** 2)
+            if debug > 5:
+                print("convg:", convg)
+
+        if debug > 6 and HT_done != HT:
+            print("did not converge in %d iterations, step size decreased from %g to %g" % (self.maxsteps, HT, HT_done))
+
+        _reconstruct_state(phia, curr_coeff, prefacs, step)
+        return HT_done
+
+
+def _is_dense_matrix(H):
+    return isinstance(H, np.ndarray) and H.ndim == 2 and H.shape[0] == H.shape[1]
+
+
+def _is_csr_matrix(H):
+    if sp.isspmatrix_csr(H):
+        return True
+    csr_array = getattr(sp, "csr_array", None)
+    return csr_array is not None and isinstance(H, csr_array)
+
+
+def _is_qutip_data_operator(H):
+    return have_qutip and hasattr(H, "as_scipy") and H.__class__.__module__.startswith("qutip.core.data.")
+
+
+def _select_backend(H, backend=None):
+    if backend is None:
+        backend = "auto"
+    else:
+        backend = backend.strip().lower()
+
+    if backend in ("reference", "python"):
+        return "reference"
+
+    if backend == "numba":
+        if _is_qutip_data_operator(H):
+            H = H.as_scipy()
+        if _is_dense_matrix(H):
+            return "numba_dense"
+        if _is_csr_matrix(H):
+            return "numba_csr"
+        raise ValueError("backend='numba' requested but Hamiltonian type is unsupported for numba backend.")
+
+    if backend == "cython":
+        if not have_cython_backend:
+            raise ValueError("backend='cython' requested but Cython backend extension is not available.")
+        if _is_dense_matrix(H) or _is_csr_matrix(H) or _is_qutip_data_operator(H):
+            return "cython"
+        raise ValueError("backend='cython' requested but Hamiltonian type is unsupported for cython backend.")
+
+    if backend != "auto":
+        raise ValueError("Unknown backend value '%s'. Valid values are 'python', 'numba', 'cython', 'auto'." % backend)
+
+    if callable(H):
+        return "reference"
+    if have_cython_backend and (_is_dense_matrix(H) or _is_csr_matrix(H) or _is_qutip_data_operator(H)):
+        return "cython"
+    if _is_dense_matrix(H):
+        return "numba_dense"
+    if _is_csr_matrix(H):
+        return "numba_csr"
+    return "reference"
+
+
+class lanczos_timeprop:
+    def __init__(self, H, maxsteps, target_convg, debug=0, do_full_order=False, backend=None, profile=False):
+        self.profile_enabled = bool(profile)
+        if have_qutip and isinstance(H, qutip.Qobj):
+            H_qobj_data = H.data
+            backend_result = _select_backend(H_qobj_data, backend)
+            if backend_result == "cython":
+                H = H_qobj_data
+            else:
+                H = _qobj_to_matrix(H)
+                backend_result = _select_backend(H, backend)
+        else:
+            backend_result = _select_backend(H, backend)
+        if backend_result == "cython":
+            self._impl = _sil_cython.CythonLanczosPropagator(H, maxsteps, target_convg, debug, 
+                                                             do_full_order, self.profile_enabled)
+        elif backend_result == "numba_dense":
+            self._impl = _lanczos_timeprop_numba_dense(H, maxsteps, target_convg, debug, do_full_order)
+        elif backend_result == "numba_csr":
+            self._impl = _lanczos_timeprop_numba_csr(H, maxsteps, target_convg, debug, do_full_order)
+        else:
+            self._impl = _lanczos_timeprop_reference(H, maxsteps, target_convg, debug, do_full_order)
+        self.backend = backend_result
+
+    def propagate(self, phi0, ts, maxHT=None):
+        ts = np.asarray(ts, dtype=float)
+        assert ts.ndim == 1, "ts must be a 1d array"
+
+        def get_phi_out(x):
+            return np.asarray(x).copy()
+
+        if isinstance(phi0, np.ndarray):
+            phi0_arr = np.asarray(phi0, dtype=np.complex128).reshape(-1)
+        elif have_qutip and isinstance(phi0, qutip.Qobj):
+            phi0_arr, get_phi_out = _qobj_state_io(phi0)
+            phi0_arr = np.asarray(phi0_arr, dtype=np.complex128).reshape(-1)
+        else:
+            raise TypeError("lanczos_timeprop only supports numpy.ndarray and qutip.Qobj states")
+
+        out = self._impl.propagate(phi0_arr, ts, maxHT)
+        return [get_phi_out(x) for x in out]
+
+    def profile_stats(self):
+        if self.backend == "cython" and self.profile_enabled:
+            return self._impl.get_profile_stats()
+        return None
+
+    def _step(self, t, HT):
+        return self._impl._step(t, HT)
+
+    def __getattr__(self, name):
+        return getattr(self._impl, name)
+
+
+def sesolve_lanczos(H, phi0, ts, maxsteps, target_convg, maxHT=None, debug=0, do_full_order=False, backend=None):
+    prop = lanczos_timeprop(H, maxsteps, target_convg, debug, do_full_order, backend)
     return prop.propagate(phi0, ts, maxHT)

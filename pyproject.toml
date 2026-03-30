@@ -17,6 +17,7 @@ dependencies = [
     "nbformat >= 5.0",
     "IPython >= 7.0",
     "matplotlib >= 3.0",
+    "qutip>=4.7.6",
 ]
 
 [project.urls]

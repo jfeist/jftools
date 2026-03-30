@@ -1,6 +1,31 @@
 import time
+
 import numpy as np
+import pytest
+from scipy.sparse import diags
+from scipy.sparse.linalg import expm_multiply
+
 import jftools
+
+try:
+    import qutip
+except ImportError:
+    qutip = None
+
+
+def _make_chain_hamiltonian(n):
+    offdiag = -0.5 * np.ones(n - 1, dtype=float)
+    return diags([offdiag, offdiag], offsets=[-1, 1], shape=(n, n), format="csr")
+
+
+def _normalized_random_state(n, seed=2):
+    rng = np.random.default_rng(seed)
+    phi = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    return phi / np.linalg.norm(phi)
+
+
+def _run_sil(H, phi0, ts, maxHT=0.1):
+    return jftools.short_iterative_lanczos.sesolve_lanczos(H, phi0, ts, maxsteps=14, target_convg=1e-12, maxHT=maxHT)
 
 
 def test_general():
@@ -73,7 +98,146 @@ def test_fedvr():
     assert np.allclose(wt, [0.1, 0.5444444444444444, 0.7111111111111111, 0.5444444444444444, 0.1], atol=1e-15, rtol=1e-15)
 
 
-def test_short_iterative_lanczos():
-    # Test short_iterative_lanczos function
-    # Add your test for the short_iterative_lanczos function here
-    pass
+def test_short_iterative_lanczos_dense_and_sparse_against_expm_multiply():
+    n = 18
+    H_sparse = _make_chain_hamiltonian(n)
+    H_dense = H_sparse.toarray()
+    phi0 = _normalized_random_state(n)
+    ts = np.linspace(0.0, 0.4, 5)
+
+    prop_dense = jftools.short_iterative_lanczos.lanczos_timeprop(H_dense, maxsteps=14, target_convg=1e-12)
+    prop_sparse = jftools.short_iterative_lanczos.lanczos_timeprop(H_sparse, maxsteps=14, target_convg=1e-12)
+    assert prop_dense.backend in ("numba_dense", "cython")
+    assert prop_sparse.backend in ("numba_csr", "cython")
+
+    phis_dense = _run_sil(H_dense, phi0, ts)
+    phis_sparse = _run_sil(H_sparse, phi0, ts)
+
+    for t, phi_dense, phi_sparse in zip(ts, phis_dense, phis_sparse):
+        phi_ref = expm_multiply(-1j * t * H_dense, phi0)
+        assert np.allclose(phi_dense, phi_ref, rtol=5e-9, atol=5e-10)
+        assert np.allclose(phi_sparse, phi_ref, rtol=5e-9, atol=5e-10)
+
+
+def test_short_iterative_lanczos_3x3_hamiltonian_dense_sparse():
+    H_dense = np.array(
+        [
+            [0.3, -0.2, 0.0],
+            [-0.2, 0.1, -0.15],
+            [0.0, -0.15, -0.4],
+        ],
+        dtype=complex,
+    )
+    H_sparse = diags(
+        [
+            np.array([-0.2, -0.15], dtype=float),
+            np.array([0.3, 0.1, -0.4], dtype=float),
+            np.array([-0.2, -0.15], dtype=float),
+        ],
+        offsets=[-1, 0, 1],
+        shape=(3, 3),
+        format="csr",
+    ).astype(complex)
+    phi0 = np.array([1.0 + 0.0j, 0.2 - 0.1j, -0.3 + 0.4j], dtype=complex)
+    phi0 = phi0 / np.linalg.norm(phi0)
+    ts = np.array([0.0, 0.1, 0.25, 0.5], dtype=float)
+
+    dense_out = _run_sil(H_dense, phi0, ts, maxHT=0.05)
+    sparse_out = _run_sil(H_sparse, phi0, ts, maxHT=0.05)
+
+    for t, phi_dense, phi_sparse in zip(ts, dense_out, sparse_out):
+        phi_ref = expm_multiply(-1j * t * H_dense, phi0)
+        assert np.allclose(phi_dense, phi_ref, rtol=5e-10, atol=5e-12)
+        assert np.allclose(phi_sparse, phi_ref, rtol=5e-10, atol=5e-12)
+
+
+@pytest.mark.skipif(qutip is None, reason="qutip not installed")
+def test_short_iterative_lanczos_3x3_hamiltonian_qutip_inputs():
+    H_sparse = diags(
+        [
+            np.array([-0.2, -0.15], dtype=float),
+            np.array([0.3, 0.1, -0.4], dtype=float),
+            np.array([-0.2, -0.15], dtype=float),
+        ],
+        offsets=[-1, 0, 1],
+        shape=(3, 3),
+        format="csr",
+    ).astype(complex)
+    H_q = qutip.Qobj(H_sparse)
+    phi0_np = np.array([1.0 + 0.0j, 0.2 - 0.1j, -0.3 + 0.4j], dtype=complex)
+    phi0_np = phi0_np / np.linalg.norm(phi0_np)
+    phi0_q = qutip.Qobj(phi0_np)
+    ts = np.array([0.0, 0.2, 0.4], dtype=float)
+
+    out_np = _run_sil(H_q, phi0_np, ts, maxHT=0.05)
+    out_q = _run_sil(H_q, phi0_q, ts, maxHT=0.05)
+
+    assert isinstance(out_np[-1], np.ndarray)
+    assert isinstance(out_q[-1], qutip.Qobj)
+    assert out_q[-1].dims == phi0_q.dims
+    assert np.allclose(out_q[-1].full().ravel(), out_np[-1], rtol=5e-10, atol=5e-12)
+
+
+def test_short_iterative_lanczos_time_dependent_callable_regression():
+    n = 20
+    H0 = _make_chain_hamiltonian(n).toarray().astype(complex)
+    x = np.linspace(-1.0, 1.0, n)
+    V = np.diag(x)
+    phi0 = _normalized_random_state(n, seed=8)
+    ts = np.linspace(0.0, 0.6, 7)
+
+    def Hfun(t, phi, Hphi):
+        Hphi[:] = H0.dot(phi) + np.sin(0.7 * t) * V.dot(phi)
+        return Hphi
+
+    phis_coarse = _run_sil(Hfun, phi0, ts, maxHT=0.1)
+    phis_fine = _run_sil(Hfun, phi0, ts, maxHT=0.05)
+
+    for phi in phis_coarse:
+        assert np.isclose(np.linalg.norm(phi), 1.0, rtol=5e-8, atol=5e-10)
+    rel_err = np.linalg.norm(phis_coarse[-1] - phis_fine[-1]) / np.linalg.norm(phis_fine[-1])
+    assert rel_err < 1e-2
+
+
+@pytest.mark.skipif(qutip is None, reason="qutip not installed")
+def test_short_iterative_lanczos_qutip_h_and_state_compatibility():
+    n = 16
+    H_sparse = _make_chain_hamiltonian(n)
+    H_qobj = qutip.Qobj(H_sparse)
+    ts = np.linspace(0.0, 0.3, 4)
+
+    phi_np = _normalized_random_state(n, seed=4)
+    prop_qobj = jftools.short_iterative_lanczos.lanczos_timeprop(H_qobj, maxsteps=14, target_convg=1e-12)
+    assert prop_qobj.backend in ("numba_csr", "cython")
+
+    out_np = _run_sil(H_qobj, phi_np, ts)
+    assert isinstance(out_np[-1], np.ndarray)
+
+    phi_qobj = qutip.Qobj(phi_np)
+    out_qobj = _run_sil(H_qobj, phi_qobj, ts)
+    assert isinstance(out_qobj[-1], qutip.Qobj)
+    assert out_qobj[-1].dims == phi_qobj.dims
+    assert np.allclose(out_qobj[-1].full().ravel(), out_np[-1], rtol=5e-9, atol=5e-10)
+
+
+def test_short_iterative_lanczos_unknown_backend_raises():
+    H = _make_chain_hamiltonian(8)
+    with pytest.raises(ValueError, match="Unknown backend value"):
+        jftools.short_iterative_lanczos.lanczos_timeprop(H, maxsteps=8, target_convg=1e-12, backend="made_up_backend")
+
+
+def test_short_iterative_lanczos_explicit_numba_no_fallback():
+    def Hfun(t, phi, Hphi):
+        Hphi[:] = phi
+        return Hphi
+
+    with pytest.raises(ValueError, match="backend='numba' requested"):
+        jftools.short_iterative_lanczos.lanczos_timeprop(Hfun, maxsteps=8, target_convg=1e-12, backend="numba")
+
+
+def test_short_iterative_lanczos_explicit_cython_unavailable_no_fallback(monkeypatch):
+    sil_mod = jftools.short_iterative_lanczos
+    H = _make_chain_hamiltonian(8)
+    monkeypatch.setattr(sil_mod, "have_cython_backend", False)
+    with pytest.raises(ValueError, match="backend='cython' requested but Cython backend extension is not available"):
+        sil_mod.lanczos_timeprop(H, maxsteps=8, target_convg=1e-12, backend="cython")
