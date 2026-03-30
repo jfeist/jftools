@@ -1,15 +1,15 @@
-name: Wheels
+name: Test release (TestPyPI)
 
 on:
-  push:
-    branches: ["main"]
-    tags: ["v*"]
-  pull_request:
-    branches: ["main"]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# Builds the full wheel matrix + sdist, uploads artifacts for inspection,
+# and publishes to TestPyPI (https://test.pypi.org) for end-to-end validation
+# before a real PyPI release.  Requires this repo to be configured as a
+# trusted publisher on TestPyPI.
 
 jobs:
   build_wheels:
@@ -49,7 +49,7 @@ jobs:
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}
+          name: testpypi-wheels-${{ matrix.os }}
           path: dist/*.whl
 
   build_sdist:
@@ -75,5 +75,25 @@ jobs:
       - name: Upload sdist artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sdist
+          name: testpypi-sdist
           path: dist/*.tar.gz
+
+  publish:
+    name: publish to TestPyPI
+    needs: [build_wheels, build_sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: testpypi-*
+          merge-multiple: true
+
+      - name: Publish distributions
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/

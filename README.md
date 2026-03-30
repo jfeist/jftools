@@ -7,7 +7,7 @@ Collection of small useful helper tools for Python by Johannes Feist.
 The `jftools.short_iterative_lanczos` solver now supports backend auto-dispatch for static Hamiltonians:
 
 - `cython` when the Cython extension is built and importable.
-- `reference` for callable Hamiltonians and unsupported formats.
+- `python` for callable Hamiltonians and unsupported formats.
 
 Select backend behavior with the `backend` function argument:
 
@@ -53,46 +53,29 @@ Short iterative Lanczos targets modern QuTiP (5.x):
 - QuTiP state outputs preserve `dims` and state shape.
 - Tests skip QuTiP-specific checks if QuTiP is not installed.
 
-## Benchmark
+## Publishing
 
-Run the standalone benchmark script:
+Releases are intended to be published through GitHub Actions rather than from a local machine.
+
+Before publishing a new version:
+
+1. Update the version in [meson.build](meson.build) (the single source of truth; [pyproject.toml](pyproject.toml) picks it up automatically).
+2. Commit and push the version bump.
+3. Optionally run the `Test release (TestPyPI)` workflow to verify the full wheel matrix before publishing.
+4. Create a GitHub Release or run the `Publish` workflow manually.
+
+The publish workflow builds:
+
+- wheels for CPython 3.12, 3.13, and 3.14,
+- Linux `x86_64` and `aarch64`,
+- macOS `x86_64` and `arm64`,
+- Windows `AMD64`,
+- plus an sdist.
+
+For a dry run against TestPyPI, use the `Test release (TestPyPI)` workflow.
+
+For a local packaging sanity check on your current machine only:
 
 ```bash
-uv run python dev/bench_short_iterative_lanczos.py
+uv build
 ```
-
-Example with explicit size sweep and CSV export:
-
-```bash
-uv run python dev/bench_short_iterative_lanczos.py --sizes 500 1000 2000 5000 --repeats 3 --csv dev/bench_short_iterative_lanczos.csv
-```
-
-The benchmark reports, for each case:
-
-- selected auto backend,
-- warmup timing (first call, includes JIT compile cost),
-- steady-state timing (average repeated calls),
-- steady-state speedup and relative error versus the reference backend.
-
-For dense Cython cases, you can also request a per-phase timing breakdown:
-
-```bash
-uv run python dev/bench_short_iterative_lanczos.py --sizes 500 --profile-dense
-```
-
-This adds one profiled auto-backend pass for dense cases and prints the time spent in:
-
-- dense matvec,
-- orthogonalization and basis updates,
-- coefficient and eigensolve work,
-- state reconstruction,
-- total profiled runtime.
-
-Useful options:
-
-- `--sizes`: one or more system sizes.
-- `--repeats`: number of steady-state repetitions.
-- `--n-times`: number of time points in `ts`.
-- `--t-final`: final propagation time.
-- `--csv`: path for CSV output.
-- `--profile-dense`: print a dense-case phase breakdown for the Cython backend.
