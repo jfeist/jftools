@@ -61,20 +61,18 @@ cdef class CythonLanczosPropagator:
     cdef bint do_full_order
     cdef bint is_csr
     cdef bint profile_enabled
-    cdef bint use_numpy_matmul
-    cdef bint use_numpy_dot
     cdef int dim
 
-    cdef object H_dense
+    cdef c128[::1, :] H_dense_f
     cdef object H_data
     cdef object H_indices
     cdef object H_indptr
 
-    cdef object alpha
-    cdef object beta
-    cdef object prefacs
-    cdef object curr_coeff
-    cdef object prev_coeff
+    cdef f64[::1] alpha
+    cdef f64[::1] beta
+    cdef f64[::1] prefacs
+    cdef c128[::1] curr_coeff
+    cdef c128[::1] prev_coeff
     cdef object phia
     cdef f64[::1] coeff_d_buf
     cdef f64[::1] coeff_e_buf
@@ -90,15 +88,13 @@ cdef class CythonLanczosPropagator:
     cdef Py_ssize_t profile_coeff_calls
 
     def __cinit__(self, H, int maxsteps, double target_convg, int debug=0, bint do_full_order=False, bint profile_enabled=False):
+        cdef cnp.ndarray[c128, ndim=2, mode='fortran'] H_dense_f_arr
         self.maxsteps = maxsteps
         self.target_convg = target_convg
         self.debug = debug
         self.do_full_order = do_full_order
-        cdef str dense_backend = "numpy_matmul"
 
         self.profile_enabled = profile_enabled
-        self.use_numpy_matmul = dense_backend in ("numpy", "numpy_matmul", "matmul")
-        self.use_numpy_dot = dense_backend in ("numpy_dot", "dot")
         self.profile_total = 0.0
         self.profile_matvec = 0.0
         self.profile_update = 0.0
@@ -117,17 +113,15 @@ cdef class CythonLanczosPropagator:
         else:
             self.is_csr = False
             self.dim = np.asarray(H).shape[0]
-            if self.use_numpy_matmul or self.use_numpy_dot:
-                self.H_dense = np.ascontiguousarray(H, dtype=np.complex128)
-            else:
-                self.H_dense = np.asfortranarray(H, dtype=np.complex128)
+            H_dense_f_arr = np.asfortranarray(H, dtype=np.complex128)
+            self.H_dense_f = H_dense_f_arr
 
-        # Allocate working arrays as NumPy arrays (can be used for both C-level and Python-level operations)
-        self.alpha = np.zeros(maxsteps + 1, dtype=np.float64)
-        self.beta = np.zeros(maxsteps + 1, dtype=np.float64)
-        self.prefacs = np.zeros(maxsteps + 1, dtype=np.float64)
-        self.curr_coeff = np.zeros(maxsteps + 1, dtype=np.complex128)
-        self.prev_coeff = np.zeros(maxsteps + 1, dtype=np.complex128)
+        # Allocate working arrays as Cython-owned buffers.
+        self.alpha = view.array(shape=(maxsteps + 1,), itemsize=sizeof(f64), format="d")
+        self.beta = view.array(shape=(maxsteps + 1,), itemsize=sizeof(f64), format="d")
+        self.prefacs = view.array(shape=(maxsteps + 1,), itemsize=sizeof(f64), format="d")
+        self.curr_coeff = view.array(shape=(maxsteps + 1,), itemsize=sizeof(c128), format="Zd")
+        self.prev_coeff = view.array(shape=(maxsteps + 1,), itemsize=sizeof(c128), format="Zd")
 
         # Allocate LAPACK work buffers once and reuse in _calc_coeff.
         self.coeff_d_buf = view.array(shape=(maxsteps,), itemsize=sizeof(f64), format="d")
@@ -183,11 +177,9 @@ cdef class CythonLanczosPropagator:
         cdef int i, j
         cdef c128 fac
         cdef double ang
-        cdef f64[::1] alpha_v = self.alpha
-        cdef f64[::1] beta_v = self.beta
 
-        self.coeff_d_buf[:n] = alpha_v[:n]
-        self.coeff_e_buf[:n - 1] = beta_v[1:n]
+        self.coeff_d_buf[:n] = self.alpha[:n]
+        self.coeff_e_buf[:n - 1] = self.beta[1:n]
 
         lapack.dstevd(&jobz, &n,
                       &self.coeff_d_buf[0], &self.coeff_e_buf[0],
@@ -215,10 +207,10 @@ cdef class CythonLanczosPropagator:
         cdef c128 s
         cdef c128 alpha_blas, beta_blas
         cdef int incx, incy, lda, m, ncol, vec_n
-        cdef char trans
+        cdef char trans, uplo
 
         cdef c128[:, ::1] phia_v = self.phia
-        cdef cnp.ndarray[c128, ndim=2, mode='fortran'] H_dense_f
+        cdef c128[::1, :] H_dense_f
         cdef f64[::1] alpha_v = self.alpha
         cdef f64[::1] beta_v = self.beta
         cdef f64[::1] prefacs_v = self.prefacs
@@ -232,12 +224,12 @@ cdef class CythonLanczosPropagator:
             ncol = n
             incx = 1
             incy = 1
-            if not (self.use_numpy_matmul or self.use_numpy_dot):
-                H_dense_f = self.H_dense
-                trans = 'N'
-                lda = n
-                alpha_blas = 1.0 + 0.0j
-                beta_blas = 0.0 + 0.0j
+            H_dense_f = self.H_dense_f
+            trans = 'N'
+            uplo = 'L'
+            lda = n
+            alpha_blas = 1.0 + 0.0j
+            beta_blas = 0.0 + 0.0j
 
         phinorm = _vnorm(phia_v[0])
         prefacs_v[0] = 1.0 / phinorm
@@ -251,12 +243,7 @@ cdef class CythonLanczosPropagator:
             if self.is_csr:
                 _csr_matvec(self.H_data, self.H_indices, self.H_indptr, phia_v[step - 1], phia_v[step])
             else:
-                if self.use_numpy_matmul:
-                    self.phia[step, :] = self.H_dense @ self.phia[step - 1, :]
-                elif self.use_numpy_dot:
-                    self.phia[step, :] = self.H_dense.dot(self.phia[step - 1, :])
-                else:
-                    blas.zgemv(&trans, &m, &ncol, &alpha_blas, &H_dense_f[0, 0], &lda, &phia_v[step - 1, 0], &incx, &beta_blas, &phia_v[step, 0], &incy)
+                blas.zgemv(&trans, &m, &ncol, &alpha_blas, &H_dense_f[0, 0], &lda, &phia_v[step - 1, 0], &incx, &beta_blas, &phia_v[step, 0], &incy)
             if self.profile_enabled:
                 self.profile_matvec += time.perf_counter() - t0
 
@@ -364,7 +351,7 @@ cdef class CythonLanczosPropagator:
             "reconstruct": self.profile_reconstruct,
             "step_calls": int(self.profile_step_calls),
             "coeff_calls": int(self.profile_coeff_calls),
-            "dense_matvec_backend": "numpy_matmul" if self.use_numpy_matmul else ("numpy_dot" if self.use_numpy_dot else "scipy_blas"),
+            "dense_matvec_backend": "scipy_blas",
         }
 
 
