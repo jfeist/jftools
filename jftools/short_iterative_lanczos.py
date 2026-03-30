@@ -7,11 +7,11 @@ from scipy.linalg import eigh_tridiagonal
 from scipy import sparse as sp
 
 try:
-    from . import short_iterative_lanczos_cython as _sil_cython
+    from .short_iterative_lanczos_cython import _lanczos_timeprop_cython
 
     have_cython_backend = True
 except ImportError:
-    _sil_cython = None
+    _lanczos_timeprop_cython = None
     have_cython_backend = False
 
 try:
@@ -57,6 +57,17 @@ def _matvec(H, phi):
     return H @ phi
 
 
+def _as_hfun(H):
+    """Return an in-place Hfun(t, phi, Hphi) callable for H."""
+    if callable(H):
+        return H
+
+    H_f = H.dot if hasattr(H, "dot") else H.__matmul__
+    def Hfun(t, phi, Hphi):
+        Hphi[:] = H_f(phi)
+
+    return Hfun
+
 def _qobj_state_io(phi0):
     outdims = phi0.dims
     outshape = phi0.full().shape
@@ -73,17 +84,7 @@ class _lanczos_timeprop_reference:
     def __init__(self, H, maxsteps, target_convg, debug=0, do_full_order=False):
         if have_qutip and isinstance(H, qutip.Qobj):
             H = _qobj_to_matrix(H)
-
-        if not callable(H):
-            # time-independent operator
-            # assume it supports dot or matmul for matrix-vector multiplication
-            def Hfun(t, phi, Hphi):
-                Hphi[:] = _matvec(H, phi)
-                return Hphi
-
-            self.Hfun = Hfun
-        else:
-            self.Hfun = H
+        self.Hfun = _as_hfun(H)
 
         self.maxsteps = maxsteps
         self.target_convg = target_convg
@@ -95,6 +96,7 @@ class _lanczos_timeprop_reference:
 
         self.curr_coeff = zeros(maxsteps + 1, dtype=complex)
         self.prev_coeff = self.curr_coeff.copy()
+        self.breakdown_tol = 1e-14
 
     def propagate(self, phi0, ts, maxHT=None):
         phi0 = np.asarray(phi0).view(normdotndarray)
@@ -129,6 +131,7 @@ class _lanczos_timeprop_reference:
         prev_coeff = self.prev_coeff
         debug = self.debug
         Hfun = self.Hfun
+        max_lanczos_steps = min(self.maxsteps, phia[0].shape[0])
 
         HT_done = HT
 
@@ -140,9 +143,12 @@ class _lanczos_timeprop_reference:
         # doesn't converge at first step
         curr_coeff[:] = 0.0
 
-        for step in range(1, self.maxsteps + 1):
+        convg = np.inf
+        exact_complete = False
+
+        for step in range(1, max_lanczos_steps + 1):
             # set |phia(step)> to H|phia(step-1)>
-            phia[step] = Hfun(t, phia[step - 1], phia[step])
+            Hfun(t, phia[step - 1], phia[step])
             prefacs[step] = prefacs[step - 1]
             phinorm = prefacs[step] * phia[step].norm()
             # phinorm = sqrt(<q(step-1)|H H|q(step-1)>)
@@ -177,18 +183,23 @@ class _lanczos_timeprop_reference:
             # i.e. to prefac = 1.d0 / sqrt(<phi|phi>)
             phinorm = phia[step].norm()
             beta[step - 1] = prefacs[step] * phinorm
-            prefacs[step] = 1.0 / phinorm
-            if abs(log10(prefacs[step])) > 4.0:
-                phia[step] *= prefacs[step]
+            if phinorm <= self.breakdown_tol:
                 prefacs[step] = 1.0
-            if abs(beta[step - 1]) < 1e-2 and debug > 2:
-                print("WARNING! beta[%d]=%g is very small - there seems to be a linearly dependent vector!" % (step, beta[step - 1]))
-            if debug > 1:
-                # check if new vector is orthogonal to all others
-                for ii in range(step):
-                    dotpr = prefacs[ii] * prefacs[step] * phia[ii].dot(phia[step])
-                if abs(dotpr) > 1e-12:
-                    print("WARNING! vectors not orthogonal. dotpr(%d,%d) = %g" % (ii, step, dotpr))
+                phia[step][:] = 0.0
+                exact_complete = True
+            else:
+                prefacs[step] = 1.0 / phinorm
+                if abs(log10(prefacs[step])) > 4.0:
+                    phia[step] *= prefacs[step]
+                    prefacs[step] = 1.0
+                if abs(beta[step - 1]) < 1e-2 and debug > 2:
+                    print("WARNING! beta[%d]=%g is very small - there seems to be a linearly dependent vector!" % (step, beta[step - 1]))
+                if debug > 1:
+                    # check if new vector is orthogonal to all others
+                    for ii in range(step):
+                        dotpr = prefacs[ii] * prefacs[step] * phia[ii].dot(phia[step])
+                    if abs(dotpr) > 1e-12:
+                        print("WARNING! vectors not orthogonal. dotpr(%d,%d) = %g" % (ii, step, dotpr))
 
             # check convergence
             prev_coeff[:] = curr_coeff[:]
@@ -201,6 +212,9 @@ class _lanczos_timeprop_reference:
             if debug > 5:
                 print("convg:", convg)
 
+            if exact_complete or step == max_lanczos_steps:
+                break
+
             if not self.do_full_order and convg < self.target_convg:
                 break
 
@@ -209,7 +223,7 @@ class _lanczos_timeprop_reference:
             print(beta[: step - 1])
 
         # if convergence was reached in lanczos_loop, convg < target_convg, and this loop is never entered
-        while convg > self.target_convg:
+        while (not exact_complete) and convg > self.target_convg:
             # error (~convg) should be O(HT**maxsteps)
             # convg = a * HT**maxsteps
             # target_convg = a * HT_new**maxsteps
@@ -258,11 +272,8 @@ def _is_csr_matrix(H):
     return csr_array is not None and isinstance(H, csr_array)
 
 
-def _select_backend(H, backend=None):
-    if backend is None:
-        backend = "auto"
-    else:
-        backend = backend.strip().lower()
+def _select_backend(H, backend):
+    backend = backend.strip().lower()
 
     if backend == "python":
         return "python"
@@ -270,28 +281,26 @@ def _select_backend(H, backend=None):
     if backend == "cython":
         if not have_cython_backend:
             raise ValueError("backend='cython' requested but Cython backend extension is not available.")
-        if _is_dense_matrix(H) or _is_csr_matrix(H):
-            return "cython"
-        raise ValueError("backend='cython' requested but Hamiltonian type is unsupported for cython backend.")
+        return "cython"
 
     if backend != "auto":
         raise ValueError("Unknown backend value '%s'. Valid values are 'python', 'cython', 'auto'." % backend)
 
-    if callable(H):
-        return "python"
-    if have_cython_backend and (_is_dense_matrix(H) or _is_csr_matrix(H)):
+    if have_cython_backend:
         return "cython"
     return "python"
 
 
 class lanczos_timeprop:
-    def __init__(self, H, maxsteps, target_convg, debug=0, do_full_order=False, backend=None):
+    def __init__(self, H, maxsteps, target_convg, debug=0, do_full_order=False, backend="auto"):
         if have_qutip and isinstance(H, qutip.Qobj):
             H = _qobj_to_matrix(H)
         self.backend = _select_backend(H, backend)
         if self.backend == "cython":
-            self._impl = _sil_cython.CythonLanczosPropagator(H, maxsteps, target_convg, debug, 
-                                                             do_full_order)
+            if not (_is_dense_matrix(H) or _is_csr_matrix(H)):
+                H = _as_hfun(H)
+
+            self._impl = _lanczos_timeprop_cython(H, maxsteps, target_convg, debug, do_full_order)
         else:
             self._impl = _lanczos_timeprop_reference(H, maxsteps, target_convg, debug, do_full_order)
 
@@ -320,6 +329,6 @@ class lanczos_timeprop:
         return getattr(self._impl, name)
 
 
-def sesolve_lanczos(H, phi0, ts, maxsteps, target_convg, maxHT=None, debug=0, do_full_order=False, backend=None):
+def sesolve_lanczos(H, phi0, ts, maxsteps, target_convg, maxHT=None, debug=0, do_full_order=False, backend="auto"):
     prop = lanczos_timeprop(H, maxsteps, target_convg, debug, do_full_order, backend)
     return prop.propagate(phi0, ts, maxHT)

@@ -3,7 +3,7 @@ import time
 import numpy as np
 import pytest
 from scipy.sparse import diags
-from scipy.sparse.linalg import expm_multiply
+from scipy.sparse.linalg import LinearOperator, expm_multiply
 
 import jftools
 
@@ -107,8 +107,8 @@ def test_short_iterative_lanczos_dense_and_sparse_against_expm_multiply():
 
     prop_dense = jftools.short_iterative_lanczos.lanczos_timeprop(H_dense, maxsteps=14, target_convg=1e-12)
     prop_sparse = jftools.short_iterative_lanczos.lanczos_timeprop(H_sparse, maxsteps=14, target_convg=1e-12)
-    assert prop_dense.backend in ("reference", "cython")
-    assert prop_sparse.backend in ("reference", "cython")
+    assert prop_dense.backend in ("python", "cython")
+    assert prop_sparse.backend in ("python", "cython")
 
     phis_dense = _run_sil(H_dense, phi0, ts)
     phis_sparse = _run_sil(H_sparse, phi0, ts)
@@ -199,6 +199,101 @@ def test_short_iterative_lanczos_time_dependent_callable_regression():
     assert rel_err < 1e-2
 
 
+@pytest.mark.parametrize("n", [1, 2, 3])
+@pytest.mark.parametrize("backend", ["python", "cython"])
+def test_short_iterative_lanczos_small_dense_diagonal_exact(backend, n):
+    if backend == "cython" and not jftools.short_iterative_lanczos.have_cython_backend:
+        pytest.skip("cython backend not available")
+
+    diag_vals = np.linspace(-0.7, 1.1, n)
+    H = np.diag(diag_vals).astype(complex)
+    phi0 = _normalized_random_state(n, seed=20 + n)
+    ts = np.linspace(0.0, 0.6, 5)
+
+    out = jftools.short_iterative_lanczos.sesolve_lanczos(
+        H,
+        phi0,
+        ts,
+        maxsteps=8,
+        target_convg=1e-13,
+        maxHT=0.05,
+        backend=backend,
+    )
+
+    for t, phi in zip(ts, out):
+        phi_ref = np.exp(-1j * diag_vals * t) * phi0
+        assert np.allclose(phi, phi_ref, rtol=5e-11, atol=5e-13)
+
+
+@pytest.mark.parametrize("backend", ["python", "cython"])
+def test_short_iterative_lanczos_small_callable_diagonal_exact(backend):
+    if backend == "cython" and not jftools.short_iterative_lanczos.have_cython_backend:
+        pytest.skip("cython backend not available")
+
+    n = 3
+    h0_diag = np.array([0.8, -0.6, 0.2], dtype=float)
+    hi_diag = np.array([0.4, 0.1, -0.3], dtype=float)
+    omega = 2.3
+    phi0 = _normalized_random_state(n, seed=31)
+    ts = np.linspace(0.0, 0.6, 5)
+
+    H0 = np.diag(h0_diag).astype(complex)
+    HI = np.diag(hi_diag).astype(complex)
+
+    def Hfun(t, phi, Hphi):
+        Hphi[:] = H0.dot(phi)
+        Hphi[:] += np.cos(omega * t) * HI.dot(phi)
+        return Hphi
+
+    out = jftools.short_iterative_lanczos.sesolve_lanczos(
+        Hfun,
+        phi0,
+        ts,
+        maxsteps=8,
+        target_convg=1e-13,
+        maxHT=2e-4,
+        backend=backend,
+    )
+
+    for t, phi in zip(ts, out):
+        theta = h0_diag * t + (hi_diag / omega) * np.sin(omega * t)
+        phi_ref = np.exp(-1j * theta) * phi0
+        assert np.allclose(phi, phi_ref, rtol=2e-4, atol=1e-6)
+
+
+@pytest.mark.parametrize("backend", ["python", "cython"])
+def test_short_iterative_lanczos_full_basis_completion_stops_cleanly(backend):
+    if backend == "cython" and not jftools.short_iterative_lanczos.have_cython_backend:
+        pytest.skip("cython backend not available")
+
+    n = 3
+    H = np.array(
+        [
+            [0.3, -0.2, 0.05],
+            [-0.2, 0.1, -0.15],
+            [0.05, -0.15, -0.4],
+        ],
+        dtype=complex,
+    )
+    phi0 = _normalized_random_state(n, seed=42)
+    ts = np.array([0.0, 0.2, 0.4], dtype=float)
+
+    out = jftools.short_iterative_lanczos.sesolve_lanczos(
+        H,
+        phi0,
+        ts,
+        maxsteps=10,
+        target_convg=1e-30,
+        maxHT=0.4,
+        do_full_order=True,
+        backend=backend,
+    )
+
+    for t, phi in zip(ts, out):
+        phi_ref = expm_multiply(-1j * t * H, phi0)
+        assert np.allclose(phi, phi_ref, rtol=5e-11, atol=5e-13)
+
+
 @pytest.mark.skipif(qutip is None, reason="qutip not installed")
 def test_short_iterative_lanczos_qutip_h_and_state_compatibility():
     n = 16
@@ -208,7 +303,7 @@ def test_short_iterative_lanczos_qutip_h_and_state_compatibility():
 
     phi_np = _normalized_random_state(n, seed=4)
     prop_qobj = jftools.short_iterative_lanczos.lanczos_timeprop(H_qobj, maxsteps=14, target_convg=1e-12)
-    assert prop_qobj.backend in ("reference", "cython")
+    assert prop_qobj.backend in ("python", "cython")
 
     out_np = _run_sil(H_qobj, phi_np, ts)
     assert isinstance(out_np[-1], np.ndarray)
@@ -235,9 +330,76 @@ def test_short_iterative_lanczos_explicit_python_allowed_for_callable():
     assert prop.backend == "python"
 
 
+def test_short_iterative_lanczos_explicit_cython_callable_needs_no_dim():
+    if not jftools.short_iterative_lanczos.have_cython_backend:
+        pytest.skip("cython backend not available")
+
+    n = 12
+    H_dense = _make_chain_hamiltonian(n).toarray().astype(complex)
+    phi0 = _normalized_random_state(n, seed=11)
+    ts = np.linspace(0.0, 0.3, 4)
+
+    def Hfun(t, phi, Hphi):
+        Hphi[:] = H_dense.dot(phi)
+
+    prop = jftools.short_iterative_lanczos.lanczos_timeprop(Hfun, maxsteps=14, target_convg=1e-12, backend="cython")
+    assert prop.backend == "cython"
+
+    out_cython = prop.propagate(phi0, ts, maxHT=0.05)
+    out_python = jftools.short_iterative_lanczos.sesolve_lanczos(
+        Hfun,
+        phi0,
+        ts,
+        maxsteps=14,
+        target_convg=1e-12,
+        maxHT=0.05,
+        backend="python",
+    )
+
+    for phi_cython, phi_python in zip(out_cython, out_python):
+        assert np.allclose(phi_cython, phi_python, rtol=5e-10, atol=5e-12)
+
+
 def test_short_iterative_lanczos_explicit_cython_unavailable_no_fallback(monkeypatch):
     sil_mod = jftools.short_iterative_lanczos
     H = _make_chain_hamiltonian(8)
     monkeypatch.setattr(sil_mod, "have_cython_backend", False)
     with pytest.raises(ValueError, match="backend='cython' requested but Cython backend extension is not available"):
         sil_mod.lanczos_timeprop(H, maxsteps=8, target_convg=1e-12, backend="cython")
+
+
+def test_short_iterative_lanczos_auto_prefers_cython_for_linear_operator():
+    if not jftools.short_iterative_lanczos.have_cython_backend:
+        pytest.skip("cython backend not available")
+
+    n = 10
+    H_dense = _make_chain_hamiltonian(n).toarray().astype(complex)
+    phi0 = _normalized_random_state(n, seed=13)
+    ts = np.linspace(0.0, 0.25, 4)
+
+    H_linop = LinearOperator(
+        shape=(n, n),
+        matvec=lambda x: H_dense.dot(x),
+        dtype=np.complex128,
+    )
+    def Hfun(t, phi, Hphi):
+        Hphi[:] = H_linop(phi)
+
+    prop_auto = jftools.short_iterative_lanczos.lanczos_timeprop(
+        Hfun, maxsteps=12, target_convg=1e-12, backend="auto"
+    )
+    assert prop_auto.backend == "cython"
+
+    out_auto = prop_auto.propagate(phi0, ts, maxHT=0.05)
+    out_python = jftools.short_iterative_lanczos.sesolve_lanczos(
+        Hfun,
+        phi0,
+        ts,
+        maxsteps=12,
+        target_convg=1e-12,
+        maxHT=0.05,
+        backend="python",
+    )
+
+    for phi_auto, phi_py in zip(out_auto, out_python):
+        assert np.allclose(phi_auto, phi_py, rtol=5e-9, atol=5e-11)
