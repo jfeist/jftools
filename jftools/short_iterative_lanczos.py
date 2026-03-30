@@ -285,14 +285,13 @@ def _select_backend(H, backend=None):
 
 
 class lanczos_timeprop:
-    def __init__(self, H, maxsteps, target_convg, debug=0, do_full_order=False, backend=None, profile=False):
-        self.profile_enabled = bool(profile)
+    def __init__(self, H, maxsteps, target_convg, debug=0, do_full_order=False, backend=None):
         if have_qutip and isinstance(H, qutip.Qobj):
             H = _qobj_to_matrix(H)
         self.backend = _select_backend(H, backend)
         if self.backend == "cython":
             self._impl = _sil_cython.CythonLanczosPropagator(H, maxsteps, target_convg, debug, 
-                                                             do_full_order, self.profile_enabled)
+                                                             do_full_order)
         else:
             self._impl = _lanczos_timeprop_reference(H, maxsteps, target_convg, debug, do_full_order)
 
@@ -313,11 +312,6 @@ class lanczos_timeprop:
 
         out = self._impl.propagate(phi0_arr, ts, maxHT)
         return [get_phi_out(x) for x in out]
-
-    def profile_stats(self):
-        if self.backend == "cython" and self.profile_enabled:
-            return self._impl.get_profile_stats()
-        return None
 
     def _step(self, t, HT):
         return self._impl._step(t, HT)
