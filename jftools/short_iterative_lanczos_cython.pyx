@@ -6,10 +6,11 @@
 import numpy as np
 import time
 cimport numpy as cnp
-from libc.math cimport sqrt, log10, fabs, pow
+from cython cimport view
+from libc.math cimport sqrt, log10, fabs, pow, cos, sin
 from scipy import sparse as sp
-from scipy.linalg import eigh_tridiagonal
 cimport scipy.linalg.cython_blas as blas
+cimport scipy.linalg.cython_lapack as lapack
 
 ctypedef cnp.complex128_t c128
 ctypedef cnp.float64_t f64
@@ -53,24 +54,6 @@ cdef void _csr_matvec(c128[::1] data, i64[::1] indices, i64[::1] indptr,
         y[i] = acc
 
 
-cdef void _calc_coeff(cnp.ndarray[f64, ndim=1] alpha,
-                      cnp.ndarray[f64, ndim=1] beta,
-                      int step,
-                      double HT,
-                      cnp.ndarray[c128, ndim=1] coeff) except *:
-    cdef cnp.ndarray[f64, ndim=1] vals
-    cdef cnp.ndarray[f64, ndim=2] vecs
-    cdef cnp.ndarray[c128, ndim=1] phases
-    cdef int i, j
-
-    vals, vecs = eigh_tridiagonal(alpha[:step].copy(), beta[1:step].copy())
-    phases = np.exp(-1j * HT * vals)
-    coeff[:] = 0.0
-    for j in range(step):
-        for i in range(step):
-            coeff[j] += vecs[j, i] * vecs[0, i] * phases[i]
-
-
 cdef class CythonLanczosPropagator:
     cdef int maxsteps
     cdef double target_convg
@@ -94,6 +77,11 @@ cdef class CythonLanczosPropagator:
     cdef object prev_coeff
     cdef object phia
     cdef object phia_rows
+    cdef f64[::1] coeff_d_buf
+    cdef f64[::1] coeff_e_buf
+    cdef f64[:, ::1] coeff_z_buf
+    cdef f64[::1] coeff_work_buf
+    cdef int[::1] coeff_iwork_buf
     cdef object timer
     cdef double profile_total
     cdef double profile_matvec
@@ -143,6 +131,13 @@ cdef class CythonLanczosPropagator:
         self.curr_coeff = np.zeros(maxsteps + 1, dtype=np.complex128)
         self.prev_coeff = np.zeros(maxsteps + 1, dtype=np.complex128)
 
+        # Allocate LAPACK work buffers once and reuse in _calc_coeff.
+        self.coeff_d_buf = view.array(shape=(maxsteps,), itemsize=sizeof(f64), format="d")
+        self.coeff_e_buf = view.array(shape=(maxsteps,), itemsize=sizeof(f64), format="d")
+        self.coeff_z_buf = view.array(shape=(maxsteps, maxsteps), itemsize=sizeof(f64), format="d", mode="c")
+        self.coeff_work_buf = view.array(shape=(1 + 4 * maxsteps + maxsteps * maxsteps,), itemsize=sizeof(f64), format="d")
+        self.coeff_iwork_buf = view.array(shape=(3 + 5 * maxsteps,), itemsize=sizeof(int), format="i")
+
     cpdef list propagate(self, cnp.ndarray[c128, ndim=1] phi0, cnp.ndarray[f64, ndim=1] ts, object maxHT=None):
         cdef int n = phi0.shape[0]
         cdef double tt, tf, HT, HT_done
@@ -175,6 +170,51 @@ cdef class CythonLanczosPropagator:
             self.profile_total += self.timer() - t0
 
         return out
+
+    cdef void _calc_coeff(self,
+                          int step,
+                          double HT,
+                          c128[::1] coeff) except *:
+        # dstevd overwrites d/e and writes eigenvectors to z with leading dimension ldz.
+        # z is allocated once as C-order (maxsteps x maxsteps), so ldz must be maxsteps.
+        cdef int n = step
+        cdef int ldz = <int>self.coeff_z_buf.shape[1]
+        cdef int lwork = <int>self.coeff_work_buf.shape[0]
+        cdef int liwork = <int>self.coeff_iwork_buf.shape[0]
+        cdef int info = 0
+        cdef char jobz = b'V'
+        cdef int i, j
+        cdef c128 fac
+        cdef double ang
+        cdef f64[::1] alpha = self.alpha
+        cdef f64[::1] beta = self.beta
+        cdef f64[::1] d_buf = self.coeff_d_buf
+        cdef f64[::1] e_buf = self.coeff_e_buf
+        cdef f64[:, ::1] z_buf = self.coeff_z_buf
+        cdef f64[::1] work_buf = self.coeff_work_buf
+        cdef int[::1] iwork_buf = self.coeff_iwork_buf
+
+        for i in range(n):
+            d_buf[i] = alpha[i]
+        for i in range(n - 1):
+            e_buf[i] = beta[i + 1]
+
+        lapack.dstevd(&jobz, &n,
+                      &d_buf[0], &e_buf[0],
+                      &z_buf[0, 0], &ldz,
+                      &work_buf[0], &lwork,
+                      &iwork_buf[0], &liwork,
+                      &info)
+        if info != 0:
+            raise RuntimeError(f"dstevd failed with info={info}")
+
+        for i in range(step + 1):
+            coeff[i] = 0.0
+        for i in range(n):
+            ang = -HT * d_buf[i]
+            fac = z_buf[i, 0] * (cos(ang) + 1j * sin(ang))
+            for j in range(n):
+                coeff[j] = coeff[j] + z_buf[i, j] * fac
 
     cdef double _step(self, double HT):
         cdef int step, ii, jj, n
@@ -290,7 +330,7 @@ cdef class CythonLanczosPropagator:
             self.prev_coeff[:] = self.curr_coeff
             if self.profile_enabled:
                 t0 = self.timer()
-            _calc_coeff(self.alpha, self.beta, step, HT_done, self.curr_coeff)
+            self._calc_coeff(step, HT_done, curr_v)
             if self.profile_enabled:
                 self.profile_coeff += self.timer() - t0
                 self.profile_coeff_calls += 1
@@ -305,8 +345,8 @@ cdef class CythonLanczosPropagator:
             HT_done = HT_done * scale
             if self.profile_enabled:
                 t0 = self.timer()
-            _calc_coeff(self.alpha, self.beta, step - 1, HT_done, self.prev_coeff)
-            _calc_coeff(self.alpha, self.beta, step, HT_done, self.curr_coeff)
+            self._calc_coeff(step - 1, HT_done, prev_v)
+            self._calc_coeff(step, HT_done, curr_v)
             if self.profile_enabled:
                 self.profile_coeff += self.timer() - t0
                 self.profile_coeff_calls += 2
