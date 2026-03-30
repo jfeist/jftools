@@ -264,8 +264,8 @@ def _select_backend(H, backend=None):
     else:
         backend = backend.strip().lower()
 
-    if backend in ("reference", "python"):
-        return "reference"
+    if backend == "python":
+        return "python"
 
     if backend == "cython":
         if not have_cython_backend:
@@ -278,10 +278,10 @@ def _select_backend(H, backend=None):
         raise ValueError("Unknown backend value '%s'. Valid values are 'python', 'cython', 'auto'." % backend)
 
     if callable(H):
-        return "reference"
+        return "python"
     if have_cython_backend and (_is_dense_matrix(H) or _is_csr_matrix(H)):
         return "cython"
-    return "reference"
+    return "python"
 
 
 class lanczos_timeprop:
@@ -289,13 +289,12 @@ class lanczos_timeprop:
         self.profile_enabled = bool(profile)
         if have_qutip and isinstance(H, qutip.Qobj):
             H = _qobj_to_matrix(H)
-        backend_result = _select_backend(H, backend)
-        if backend_result == "cython":
+        self.backend = _select_backend(H, backend)
+        if self.backend == "cython":
             self._impl = _sil_cython.CythonLanczosPropagator(H, maxsteps, target_convg, debug, 
                                                              do_full_order, self.profile_enabled)
         else:
             self._impl = _lanczos_timeprop_reference(H, maxsteps, target_convg, debug, do_full_order)
-        self.backend = backend_result
 
     def propagate(self, phi0, ts, maxHT=None):
         ts = np.asarray(ts, dtype=float)

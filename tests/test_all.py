@@ -232,7 +232,7 @@ def test_short_iterative_lanczos_explicit_python_allowed_for_callable():
         return Hphi
 
     prop = jftools.short_iterative_lanczos.lanczos_timeprop(Hfun, maxsteps=8, target_convg=1e-12, backend="python")
-    assert prop.backend == "reference"
+    assert prop.backend == "python"
 
 
 def test_short_iterative_lanczos_explicit_cython_unavailable_no_fallback(monkeypatch):

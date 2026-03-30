@@ -73,7 +73,7 @@ cdef class CythonLanczosPropagator:
     cdef f64[::1] prefacs
     cdef c128[::1] curr_coeff
     cdef c128[::1] prev_coeff
-    cdef object phia
+    cdef c128[:, ::1] phia
     cdef f64[::1] coeff_d_buf
     cdef f64[::1] coeff_e_buf
     cdef f64[:, ::1] coeff_z_buf
@@ -115,6 +115,7 @@ cdef class CythonLanczosPropagator:
             self.dim = self.H_dense_f.shape[0]
 
         # Allocate working arrays as Cython-owned buffers.
+        self.phia = view.array(shape=(maxsteps + 1, self.dim), itemsize=sizeof(c128), format="Zd", mode="c")
         self.alpha = view.array(shape=(maxsteps + 1,), itemsize=sizeof(f64), format="d")
         self.beta = view.array(shape=(maxsteps + 1,), itemsize=sizeof(f64), format="d")
         self.prefacs = view.array(shape=(maxsteps + 1,), itemsize=sizeof(f64), format="d")
@@ -128,11 +129,14 @@ cdef class CythonLanczosPropagator:
         self.coeff_work_buf = view.array(shape=(1 + 4 * maxsteps + maxsteps * maxsteps,), itemsize=sizeof(f64), format="d")
         self.coeff_iwork_buf = view.array(shape=(3 + 5 * maxsteps,), itemsize=sizeof(int), format="i")
 
-    cpdef list propagate(self, cnp.ndarray[c128, ndim=1] phi0, cnp.ndarray[f64, ndim=1] ts, object maxHT=None):
+    cpdef cnp.ndarray propagate(self, cnp.ndarray[c128, ndim=1] phi0, cnp.ndarray[f64, ndim=1] ts, object maxHT=None):
         cdef int n = phi0.shape[0]
         cdef double tt, tf, HT, HT_done
         cdef double t0
-        cdef list out = []
+        cdef int its
+        cdef cnp.ndarray[c128, ndim=2] out
+        cdef c128[:, ::1] out_v
+        cdef c128[::1] phi0_v = phi0
 
         if self.dim != n:
             raise ValueError("State dimension does not match Hamiltonian dimension")
@@ -140,11 +144,13 @@ cdef class CythonLanczosPropagator:
         if self.profile_enabled:
             t0 = time.perf_counter()
 
-        self.phia = np.empty((self.maxsteps + 1, n), dtype=np.complex128)
-        self.phia[:] = phi0
+        self.phia[0, :] = phi0_v
 
         tt = ts[0]
-        out.append(self.phia[0].copy())
+        out = np.empty((len(ts), n), dtype=np.complex128)
+        out_v = out
+        out_v[0, :] = phi0_v
+        its = 1
 
         for tf in ts[1:]:
             while tt < tf:
@@ -153,7 +159,8 @@ cdef class CythonLanczosPropagator:
                     HT = maxHT
                 HT_done = self._step(HT)
                 tt += HT_done
-            out.append(self.phia[0].copy())
+            out_v[its, :] = self.phia[0, :]
+            its += 1
 
         if self.profile_enabled:
             self.profile_total += time.perf_counter() - t0
