@@ -10,30 +10,6 @@ from libc.math cimport sqrt, log10, fabs, pow
 from scipy import sparse as sp
 from scipy.linalg import eigh_tridiagonal
 cimport scipy.linalg.cython_blas as blas
-from qutip.core.data.csr cimport CSR as QCSR
-from qutip.core.data.dense cimport Dense as QDense, fast_from_numpy as qd_fast_from_numpy, empty as qd_dense_empty
-from qutip.core.data.matmul cimport matmul_csr_dense_dense as qd_matmul_csr_dense_dense
-
-cdef extern from "Accelerate/Accelerate.h":
-    ctypedef enum CBLAS_ORDER:
-        CblasRowMajor
-        CblasColMajor
-    ctypedef enum CBLAS_TRANSPOSE:
-        CblasNoTrans
-        CblasTrans
-        CblasConjTrans
-    void cblas_zgemv(CBLAS_ORDER Order,
-                     CBLAS_TRANSPOSE TransA,
-                     int M,
-                     int N,
-                     const void *alpha,
-                     const void *A,
-                     int lda,
-                     const void *X,
-                     int incX,
-                     const void *beta,
-                     void *Y,
-                     int incY)
 
 ctypedef cnp.complex128_t c128
 ctypedef cnp.float64_t f64
@@ -66,14 +42,13 @@ cdef inline double _coeff_diff_norm(c128[::1] a, c128[::1] b) noexcept:
     return sqrt(s)
 
 
-cdef void _csr_matvec(c128[::1] data, i64[::1] indices, i64[::1] indptr, c128[::1] x, c128[::1] y) noexcept:
-    cdef Py_ssize_t i, jj, start, stop, nrows = indptr.shape[0] - 1
+cdef void _csr_matvec(c128[::1] data, i64[::1] indices, i64[::1] indptr,
+                      c128[::1] x, c128[::1] y) noexcept nogil:
+    cdef Py_ssize_t i, jj, n = indptr.shape[0] - 1
     cdef c128 acc
-    for i in range(nrows):
-        start = indptr[i]
-        stop = indptr[i + 1]
+    for i in range(n):
         acc = 0.0 + 0.0j
-        for jj in range(start, stop):
+        for jj in range(indptr[i], indptr[i + 1]):
             acc += data[jj] * x[indices[jj]]
         y[i] = acc
 
@@ -102,9 +77,7 @@ cdef class CythonLanczosPropagator:
     cdef int debug
     cdef bint do_full_order
     cdef bint is_csr
-    cdef bint is_qutip_data
     cdef bint profile_enabled
-    cdef bint use_accelerate_cblas
     cdef bint use_numpy_matmul
     cdef bint use_numpy_dot
     cdef int dim
@@ -121,10 +94,6 @@ cdef class CythonLanczosPropagator:
     cdef object prev_coeff
     cdef object phia
     cdef object phia_rows
-    cdef QCSR qutip_csr
-    cdef QDense qutip_x_dense
-    cdef QDense qutip_y_dense
-    cdef object qutip_x_col
     cdef object timer
     cdef double profile_total
     cdef double profile_matvec
@@ -142,7 +111,6 @@ cdef class CythonLanczosPropagator:
         cdef str dense_backend = "numpy_matmul"
 
         self.profile_enabled = profile_enabled
-        self.use_accelerate_cblas = dense_backend in ("accelerate", "accelerate_cblas", "cblas")
         self.use_numpy_matmul = dense_backend in ("numpy", "numpy_matmul", "matmul")
         self.use_numpy_dot = dense_backend in ("numpy_dot", "dot")
         self.timer = time.perf_counter if profile_enabled else None
@@ -154,23 +122,13 @@ cdef class CythonLanczosPropagator:
         self.profile_step_calls = 0
         self.profile_coeff_calls = 0
 
-        self.is_qutip_data = False
-
-        if hasattr(H, "as_scipy") and H.__class__.__module__.startswith("qutip.core.data."):
-            self.is_csr = False
-            self.is_qutip_data = True
-            self.qutip_csr = <QCSR>H
-            self.dim = H.shape[0]
-            self.qutip_x_col = np.empty((self.dim, 1), dtype=np.complex128, order="F")
-            self.qutip_x_dense = qd_fast_from_numpy(self.qutip_x_col)
-            self.qutip_y_dense = qd_dense_empty(self.dim, 1, True)
-        elif sp.isspmatrix_csr(H) or (hasattr(sp, "csr_array") and isinstance(H, sp.csr_array)):
-            H = H.tocsr()
+        if sp.isspmatrix_csr(H) or (hasattr(sp, "csr_array") and isinstance(H, sp.csr_array)):
             self.is_csr = True
             self.dim = H.shape[0]
-            self.H_data = np.asarray(H.data, dtype=np.complex128)
-            self.H_indices = np.asarray(H.indices, dtype=np.int64)
-            self.H_indptr = np.asarray(H.indptr, dtype=np.int64)
+            H_csr = sp.csr_matrix(H).astype(np.complex128)
+            self.H_data = np.asarray(H_csr.data, dtype=np.complex128)
+            self.H_indices = np.asarray(H_csr.indices, dtype=np.int64)
+            self.H_indptr = np.asarray(H_csr.indptr, dtype=np.int64)
         else:
             self.is_csr = False
             self.dim = np.asarray(H).shape[0]
@@ -226,16 +184,14 @@ cdef class CythonLanczosPropagator:
         cdef c128 dotpr
         cdef c128 s
         cdef c128 alpha_blas, beta_blas
-        cdef c128 alpha_cblas, beta_cblas
         cdef int incx, incy, lda, m, ncol, vec_n
         cdef char trans
-        cdef c128 *qx_ptr
-        cdef c128 *qy_ptr
 
         cdef c128[:, ::1] phia_v = self.phia
         cdef cnp.ndarray[c128, ndim=2, mode='fortran'] H_dense_f
-        cdef c128[:, ::1] qx_v
-        cdef c128[:, ::1] qy_v
+        cdef c128[::1] H_data_v
+        cdef i64[::1] H_indices_v
+        cdef i64[::1] H_indptr_v
         cdef f64[::1] alpha_v = self.alpha
         cdef f64[::1] beta_v = self.beta
         cdef f64[::1] prefacs_v = self.prefacs
@@ -244,7 +200,7 @@ cdef class CythonLanczosPropagator:
 
         n = phia_v.shape[1]
         vec_n = n
-        if (not self.is_csr) and (not self.is_qutip_data):
+        if not self.is_csr:
             m = n
             ncol = n
             incx = 1
@@ -255,13 +211,10 @@ cdef class CythonLanczosPropagator:
                 lda = n
                 alpha_blas = 1.0 + 0.0j
                 beta_blas = 0.0 + 0.0j
-                alpha_cblas = 1.0 + 0.0j
-                beta_cblas = 0.0 + 0.0j
-        elif self.is_qutip_data:
-            qx_v = self.qutip_x_col
-            qx_ptr = self.qutip_x_dense.data
-            qy_ptr = self.qutip_y_dense.data
-            qy_v = self.qutip_x_col
+        else:
+            H_data_v = self.H_data
+            H_indices_v = self.H_indices
+            H_indptr_v = self.H_indptr
 
         phinorm = _vnorm(phia_v[0])
         prefacs_v[0] = 1.0 / phinorm
@@ -273,32 +226,12 @@ cdef class CythonLanczosPropagator:
             if self.profile_enabled:
                 t0 = self.timer()
             if self.is_csr:
-                _csr_matvec(self.H_data, self.H_indices, self.H_indptr, phia_v[step - 1], phia_v[step])
-            elif self.is_qutip_data:
-                for jj in range(n):
-                    qx_ptr[jj] = phia_v[step - 1, jj]
-                    qy_ptr[jj] = 0.0 + 0.0j
-                qd_matmul_csr_dense_dense(self.qutip_csr, self.qutip_x_dense, 1.0 + 0.0j, self.qutip_y_dense)
-                for jj in range(n):
-                    phia_v[step, jj] = qy_ptr[jj]
+                _csr_matvec(H_data_v, H_indices_v, H_indptr_v, phia_v[step - 1], phia_v[step])
             else:
                 if self.use_numpy_matmul:
                     self.phia_rows[step][:] = self.H_dense @ self.phia_rows[step - 1]
                 elif self.use_numpy_dot:
                     self.phia_rows[step][:] = self.H_dense.dot(self.phia_rows[step - 1])
-                elif self.use_accelerate_cblas:
-                    cblas_zgemv(CblasColMajor,
-                                CblasNoTrans,
-                                m,
-                                ncol,
-                                <const void *>&alpha_cblas,
-                                <const void *>&H_dense_f[0, 0],
-                                lda,
-                                <const void *>&phia_v[step - 1, 0],
-                                incx,
-                                <const void *>&beta_cblas,
-                                <void *>&phia_v[step, 0],
-                                incy)
                 else:
                     blas.zgemv(&trans, &m, &ncol, &alpha_blas, &H_dense_f[0, 0], &lda, &phia_v[step - 1, 0], &incx, &beta_blas, &phia_v[step, 0], &incy)
             if self.profile_enabled:
@@ -313,7 +246,7 @@ cdef class CythonLanczosPropagator:
             alpha_v[step - 1] = dotpr.real
 
             s = alpha_v[step - 1] * prefacs_v[step - 1] / prefacs_v[step]
-            if (not self.is_csr) and (not self.is_qutip_data):
+            if not self.is_csr:
                 s = -s
                 blas.zaxpy(&vec_n, &s, &phia_v[step - 1, 0], &incx, &phia_v[step, 0], &incy)
             else:
@@ -323,7 +256,7 @@ cdef class CythonLanczosPropagator:
             if fabs(phinorm * phinorm - alpha_v[step - 1] * alpha_v[step - 1]) < 0.1:
                 dotpr = prefacs_v[step - 1] * prefacs_v[step] * _vdot(phia_v[step - 1], phia_v[step])
                 s = dotpr * prefacs_v[step - 1] / prefacs_v[step]
-                if (not self.is_csr) and (not self.is_qutip_data):
+                if not self.is_csr:
                     s = -s
                     blas.zaxpy(&vec_n, &s, &phia_v[step - 1, 0], &incx, &phia_v[step, 0], &incy)
                 else:
@@ -332,7 +265,7 @@ cdef class CythonLanczosPropagator:
 
             if step >= 2:
                 s = beta_v[step - 1] * prefacs_v[step - 2] / prefacs_v[step]
-                if (not self.is_csr) and (not self.is_qutip_data):
+                if not self.is_csr:
                     s = -s
                     blas.zaxpy(&vec_n, &s, &phia_v[step - 2, 0], &incx, &phia_v[step, 0], &incy)
                 else:
@@ -345,7 +278,7 @@ cdef class CythonLanczosPropagator:
 
             if fabs(log10(prefacs_v[step])) > 4.0:
                 s = prefacs_v[step]
-                if (not self.is_csr) and (not self.is_qutip_data):
+                if not self.is_csr:
                     blas.zscal(&vec_n, &s, &phia_v[step, 0], &incx)
                 else:
                     for jj in range(n):
@@ -382,14 +315,14 @@ cdef class CythonLanczosPropagator:
         if self.profile_enabled:
             t0 = self.timer()
         s = curr_v[0]
-        if (not self.is_csr) and (not self.is_qutip_data):
+        if not self.is_csr:
             blas.zscal(&vec_n, &s, &phia_v[0, 0], &incx)
         else:
             for jj in range(n):
                 phia_v[0, jj] *= s
         for ii in range(1, step + 1):
             s = curr_v[ii] * prefacs_v[ii] / prefacs_v[0]
-            if (not self.is_csr) and (not self.is_qutip_data):
+            if not self.is_csr:
                 blas.zaxpy(&vec_n, &s, &phia_v[ii, 0], &incx, &phia_v[0, 0], &incy)
             else:
                 for jj in range(n):
@@ -408,7 +341,7 @@ cdef class CythonLanczosPropagator:
             "reconstruct": self.profile_reconstruct,
             "step_calls": int(self.profile_step_calls),
             "coeff_calls": int(self.profile_coeff_calls),
-            "dense_matvec_backend": "numpy_matmul" if self.use_numpy_matmul else ("numpy_dot" if self.use_numpy_dot else ("accelerate_cblas" if self.use_accelerate_cblas else "scipy_blas")),
+            "dense_matvec_backend": "numpy_matmul" if self.use_numpy_matmul else ("numpy_dot" if self.use_numpy_dot else "scipy_blas"),
         }
 
 

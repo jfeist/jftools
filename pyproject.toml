@@ -37,3 +37,10 @@ dev = [
 line-length = 200
 [tool.ruff.format]
 skip-magic-trailing-comma = true
+
+[tool.cibuildwheel]
+build = "cp312-* cp313-* cp314-*"
+skip = ["pp*", "*-win32", "*-manylinux_i686", "*-musllinux_*"]
+build-verbosity = 1
+test-requires = ["pytest>=8.3"]
+test-command = "pytest {project}/tests -q"

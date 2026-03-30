@@ -46,7 +46,9 @@ def _qobj_to_matrix(H):
     data = H.data
     if hasattr(data, "as_scipy"):
         return data.as_scipy()
-    return data
+    if hasattr(data, "to_array"):
+        return data.to_array()
+    return np.asarray(H)
 
 
 def _matvec(H, phi):
@@ -256,10 +258,6 @@ def _is_csr_matrix(H):
     return csr_array is not None and isinstance(H, csr_array)
 
 
-def _is_qutip_data_operator(H):
-    return have_qutip and hasattr(H, "as_scipy") and H.__class__.__module__.startswith("qutip.core.data.")
-
-
 def _select_backend(H, backend=None):
     if backend is None:
         backend = "auto"
@@ -272,7 +270,7 @@ def _select_backend(H, backend=None):
     if backend == "cython":
         if not have_cython_backend:
             raise ValueError("backend='cython' requested but Cython backend extension is not available.")
-        if _is_dense_matrix(H) or _is_csr_matrix(H) or _is_qutip_data_operator(H):
+        if _is_dense_matrix(H) or _is_csr_matrix(H):
             return "cython"
         raise ValueError("backend='cython' requested but Hamiltonian type is unsupported for cython backend.")
 
@@ -281,7 +279,7 @@ def _select_backend(H, backend=None):
 
     if callable(H):
         return "reference"
-    if have_cython_backend and (_is_dense_matrix(H) or _is_csr_matrix(H) or _is_qutip_data_operator(H)):
+    if have_cython_backend and (_is_dense_matrix(H) or _is_csr_matrix(H)):
         return "cython"
     return "reference"
 
@@ -290,15 +288,8 @@ class lanczos_timeprop:
     def __init__(self, H, maxsteps, target_convg, debug=0, do_full_order=False, backend=None, profile=False):
         self.profile_enabled = bool(profile)
         if have_qutip and isinstance(H, qutip.Qobj):
-            H_qobj_data = H.data
-            backend_result = _select_backend(H_qobj_data, backend)
-            if backend_result == "cython":
-                H = H_qobj_data
-            else:
-                H = _qobj_to_matrix(H)
-                backend_result = _select_backend(H, backend)
-        else:
-            backend_result = _select_backend(H, backend)
+            H = _qobj_to_matrix(H)
+        backend_result = _select_backend(H, backend)
         if backend_result == "cython":
             self._impl = _sil_cython.CythonLanczosPropagator(H, maxsteps, target_convg, debug, 
                                                              do_full_order, self.profile_enabled)

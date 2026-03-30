@@ -21,18 +21,6 @@ scipy_include = run_command(
   check: true
 ).stdout().strip()
 
-qutip_include = run_command(
-  py,
-  ['-c', 'import pathlib, qutip; print(pathlib.Path(qutip.__file__).resolve().parent)'],
-  check: true
-).stdout().strip()
-
-qutip_core_data_include = run_command(
-  py,
-  ['-c', 'import pathlib, qutip.core.data as qd; print(pathlib.Path(qd.__file__).resolve().parent)'],
-  check: true
-).stdout().strip()
-
 py.extension_module(
   'short_iterative_lanczos_cython',
   'jftools/short_iterative_lanczos_cython.pyx',
@@ -41,12 +29,10 @@ py.extension_module(
   install: true,
   cpp_args: [
     '-I' + numpy_include,
-    '-I' + qutip_core_data_include,
   ],
   cython_args: [
     '-3',
     '-I' + scipy_include,
-    '-I' + qutip_include,
   ],
 )
 
