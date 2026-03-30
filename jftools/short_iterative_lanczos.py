@@ -301,7 +301,7 @@ class lanczos_timeprop:
         assert ts.ndim == 1, "ts must be a 1d array"
 
         def get_phi_out(x):
-            return np.asarray(x).copy()
+            return np.asarray(x)
 
         if isinstance(phi0, np.ndarray):
             phi0_arr = np.asarray(phi0, dtype=np.complex128).reshape(-1)
