@@ -107,8 +107,8 @@ def test_short_iterative_lanczos_dense_and_sparse_against_expm_multiply():
 
     prop_dense = jftools.short_iterative_lanczos.lanczos_timeprop(H_dense, maxsteps=14, target_convg=1e-12)
     prop_sparse = jftools.short_iterative_lanczos.lanczos_timeprop(H_sparse, maxsteps=14, target_convg=1e-12)
-    assert prop_dense.backend in ("numba_dense", "cython")
-    assert prop_sparse.backend in ("numba_csr", "cython")
+    assert prop_dense.backend in ("reference", "cython")
+    assert prop_sparse.backend in ("reference", "cython")
 
     phis_dense = _run_sil(H_dense, phi0, ts)
     phis_sparse = _run_sil(H_sparse, phi0, ts)
@@ -208,7 +208,7 @@ def test_short_iterative_lanczos_qutip_h_and_state_compatibility():
 
     phi_np = _normalized_random_state(n, seed=4)
     prop_qobj = jftools.short_iterative_lanczos.lanczos_timeprop(H_qobj, maxsteps=14, target_convg=1e-12)
-    assert prop_qobj.backend in ("numba_csr", "cython")
+    assert prop_qobj.backend in ("reference", "cython")
 
     out_np = _run_sil(H_qobj, phi_np, ts)
     assert isinstance(out_np[-1], np.ndarray)
@@ -226,13 +226,13 @@ def test_short_iterative_lanczos_unknown_backend_raises():
         jftools.short_iterative_lanczos.lanczos_timeprop(H, maxsteps=8, target_convg=1e-12, backend="made_up_backend")
 
 
-def test_short_iterative_lanczos_explicit_numba_no_fallback():
+def test_short_iterative_lanczos_explicit_python_allowed_for_callable():
     def Hfun(t, phi, Hphi):
         Hphi[:] = phi
         return Hphi
 
-    with pytest.raises(ValueError, match="backend='numba' requested"):
-        jftools.short_iterative_lanczos.lanczos_timeprop(Hfun, maxsteps=8, target_convg=1e-12, backend="numba")
+    prop = jftools.short_iterative_lanczos.lanczos_timeprop(Hfun, maxsteps=8, target_convg=1e-12, backend="python")
+    assert prop.backend == "reference"
 
 
 def test_short_iterative_lanczos_explicit_cython_unavailable_no_fallback(monkeypatch):

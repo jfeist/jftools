@@ -7,15 +7,12 @@ Collection of small useful helper tools for Python by Johannes Feist.
 The `jftools.short_iterative_lanczos` solver now supports backend auto-dispatch for static Hamiltonians:
 
 - `cython` when the Cython extension is built and importable.
-- `numba_dense` for dense NumPy Hamiltonians.
-- `numba_csr` for SciPy CSR Hamiltonians (including static QuTiP Hamiltonians converted to CSR).
 - `reference` for callable Hamiltonians and unsupported formats.
 
 Select backend behavior with the `backend` function argument:
 
 - `auto` (default): choose the best available backend for the Hamiltonian type.
 - `python`: force the original Python implementation.
-- `numba`: force Numba backend family, with dense/CSR selected automatically.
 - `cython`: force Cython backend (requires compiled extension).
 
 If an explicit backend does not match the Hamiltonian type (or is unavailable), the solver raises an error.
@@ -23,26 +20,33 @@ If an explicit backend does not match the Hamiltonian type (or is unavailable), 
 Example:
 
 ```python
-prop = jftools.short_iterative_lanczos.lanczos_timeprop(H, maxsteps=14, target_convg=1e-12, backend="numba")
+prop = jftools.short_iterative_lanczos.lanczos_timeprop(H, maxsteps=14, target_convg=1e-12, backend="cython")
 ```
 
 ### Build Cython Extension
 
 The Cython implementation is in [jftools/short_iterative_lanczos_cython.pyx](jftools/short_iterative_lanczos_cython.pyx).
 
-Build it in-place:
+It is built automatically during normal installation via `meson-python`.
+
+Recommended (uv-only) workflow:
 
 ```bash
-uv run --with cython --with setuptools python dev/build_cython_ext.py
+uv sync --group dev
+uv run python -m pip install -e . --no-build-isolation
 ```
 
-The build helper compiles the extension in C++ mode and conditionally patches Cython's bundled `libcpp/algorithm.pxd` when the current toolchain needs it for direct QuTiP data-layer cimports.
+For a non-editable local install through uv:
+
+```bash
+uv run python -m pip install .
+```
 
 After building, `auto` prefers `cython` for static dense and CSR Hamiltonians.
 
 ## QuTiP Compatibility
 
-Short iterative Lanczos supports both QuTiP 4 and QuTiP 5 object interfaces:
+Short iterative Lanczos targets modern QuTiP (5.x):
 
 - QuTiP Hamiltonians are converted through `H.data.as_scipy()` when available.
 - When the Cython extension is built, the QuTiP 5 sparse data path uses direct Cython cimports of QuTiP's data-layer CSR matvec implementation.
