@@ -64,9 +64,9 @@ cdef class CythonLanczosPropagator:
     cdef int dim
 
     cdef c128[::1, :] H_dense_f
-    cdef object H_data
-    cdef object H_indices
-    cdef object H_indptr
+    cdef c128[::1] H_data
+    cdef i64[::1] H_indices
+    cdef i64[::1] H_indptr
 
     cdef f64[::1] alpha
     cdef f64[::1] beta
@@ -88,7 +88,6 @@ cdef class CythonLanczosPropagator:
     cdef Py_ssize_t profile_coeff_calls
 
     def __cinit__(self, H, int maxsteps, double target_convg, int debug=0, bint do_full_order=False, bint profile_enabled=False):
-        cdef cnp.ndarray[c128, ndim=2, mode='fortran'] H_dense_f_arr
         self.maxsteps = maxsteps
         self.target_convg = target_convg
         self.debug = debug
@@ -112,9 +111,8 @@ cdef class CythonLanczosPropagator:
             self.H_indptr = np.asarray(H_csr.indptr, dtype=np.int64)
         else:
             self.is_csr = False
-            self.dim = np.asarray(H).shape[0]
-            H_dense_f_arr = np.asfortranarray(H, dtype=np.complex128)
-            self.H_dense_f = H_dense_f_arr
+            self.H_dense_f = np.asfortranarray(H, dtype=np.complex128)
+            self.dim = self.H_dense_f.shape[0]
 
         # Allocate working arrays as Cython-owned buffers.
         self.alpha = view.array(shape=(maxsteps + 1,), itemsize=sizeof(f64), format="d")
@@ -190,13 +188,12 @@ cdef class CythonLanczosPropagator:
         if info != 0:
             raise RuntimeError(f"dstevd failed with info={info}")
 
-        for i in range(step + 1):
-            coeff[i] = 0.0
+        coeff[:step + 1] = 0.0
         for i in range(n):
             ang = -HT * self.coeff_d_buf[i]
             fac = self.coeff_z_buf[i, 0] * (cos(ang) + 1j * sin(ang))
             for j in range(n):
-                coeff[j] = coeff[j] + self.coeff_z_buf[i, j] * fac
+                coeff[j] += self.coeff_z_buf[i, j] * fac
 
     cdef double _step(self, double HT):
         cdef int step, ii, jj, n
@@ -206,11 +203,10 @@ cdef class CythonLanczosPropagator:
         cdef c128 dotpr
         cdef c128 s
         cdef c128 alpha_blas, beta_blas
-        cdef int incx, incy, lda, m, ncol, vec_n
-        cdef char trans, uplo
+        cdef int incx, incy, lda, m, ncol, vec_n, one
+        cdef char trans
 
         cdef c128[:, ::1] phia_v = self.phia
-        cdef c128[::1, :] H_dense_f
         cdef f64[::1] alpha_v = self.alpha
         cdef f64[::1] beta_v = self.beta
         cdef f64[::1] prefacs_v = self.prefacs
@@ -220,14 +216,9 @@ cdef class CythonLanczosPropagator:
         n = phia_v.shape[1]
         vec_n = n
         if not self.is_csr:
-            m = n
-            ncol = n
-            incx = 1
-            incy = 1
-            H_dense_f = self.H_dense_f
+            m = ncol = lda = n
+            incx = incy = one = 1
             trans = 'N'
-            uplo = 'L'
-            lda = n
             alpha_blas = 1.0 + 0.0j
             beta_blas = 0.0 + 0.0j
 
@@ -243,7 +234,7 @@ cdef class CythonLanczosPropagator:
             if self.is_csr:
                 _csr_matvec(self.H_data, self.H_indices, self.H_indptr, phia_v[step - 1], phia_v[step])
             else:
-                blas.zgemv(&trans, &m, &ncol, &alpha_blas, &H_dense_f[0, 0], &lda, &phia_v[step - 1, 0], &incx, &beta_blas, &phia_v[step, 0], &incy)
+                blas.zgemm(&trans, &trans, &m, &one, &ncol, &alpha_blas, &self.H_dense_f[0, 0], &lda, &phia_v[step - 1, 0], &ncol, &beta_blas, &phia_v[step, 0], &m)
             if self.profile_enabled:
                 self.profile_matvec += time.perf_counter() - t0
 
@@ -351,18 +342,5 @@ cdef class CythonLanczosPropagator:
             "reconstruct": self.profile_reconstruct,
             "step_calls": int(self.profile_step_calls),
             "coeff_calls": int(self.profile_coeff_calls),
-            "dense_matvec_backend": "scipy_blas",
+            "dense_matvec_backend": "scipy_blas_zgemm",
         }
-
-
-def sesolve_lanczos_cython(H,
-                           cnp.ndarray[c128, ndim=1] phi0,
-                           cnp.ndarray[f64, ndim=1] ts,
-                           int maxsteps,
-                           double target_convg,
-                           object maxHT=None,
-                           int debug=0,
-                           bint do_full_order=False,
-                           bint profile_enabled=False):
-    cdef CythonLanczosPropagator prop = CythonLanczosPropagator(H, maxsteps, target_convg, debug, do_full_order, profile_enabled)
-    return prop.propagate(phi0, ts, maxHT)
