@@ -76,13 +76,11 @@ cdef class CythonLanczosPropagator:
     cdef object curr_coeff
     cdef object prev_coeff
     cdef object phia
-    cdef object phia_rows
     cdef f64[::1] coeff_d_buf
     cdef f64[::1] coeff_e_buf
     cdef f64[:, ::1] coeff_z_buf
     cdef f64[::1] coeff_work_buf
     cdef int[::1] coeff_iwork_buf
-    cdef object timer
     cdef double profile_total
     cdef double profile_matvec
     cdef double profile_update
@@ -101,7 +99,6 @@ cdef class CythonLanczosPropagator:
         self.profile_enabled = profile_enabled
         self.use_numpy_matmul = dense_backend in ("numpy", "numpy_matmul", "matmul")
         self.use_numpy_dot = dense_backend in ("numpy_dot", "dot")
-        self.timer = time.perf_counter if profile_enabled else None
         self.profile_total = 0.0
         self.profile_matvec = 0.0
         self.profile_update = 0.0
@@ -125,6 +122,7 @@ cdef class CythonLanczosPropagator:
             else:
                 self.H_dense = np.asfortranarray(H, dtype=np.complex128)
 
+        # Allocate working arrays as NumPy arrays (can be used for both C-level and Python-level operations)
         self.alpha = np.zeros(maxsteps + 1, dtype=np.float64)
         self.beta = np.zeros(maxsteps + 1, dtype=np.float64)
         self.prefacs = np.zeros(maxsteps + 1, dtype=np.float64)
@@ -148,14 +146,13 @@ cdef class CythonLanczosPropagator:
             raise ValueError("State dimension does not match Hamiltonian dimension")
 
         if self.profile_enabled:
-            t0 = self.timer()
+            t0 = time.perf_counter()
 
         self.phia = np.empty((self.maxsteps + 1, n), dtype=np.complex128)
         self.phia[:] = phi0
-        self.phia_rows = [self.phia[ii, :] for ii in range(self.maxsteps + 1)]
 
         tt = ts[0]
-        out.append(np.asarray(self.phia[0]).copy())
+        out.append(self.phia[0].copy())
 
         for tf in ts[1:]:
             while tt < tf:
@@ -164,10 +161,10 @@ cdef class CythonLanczosPropagator:
                     HT = maxHT
                 HT_done = self._step(HT)
                 tt += HT_done
-            out.append(np.asarray(self.phia[0]).copy())
+            out.append(self.phia[0].copy())
 
         if self.profile_enabled:
-            self.profile_total += self.timer() - t0
+            self.profile_total += time.perf_counter() - t0
 
         return out
 
@@ -186,24 +183,17 @@ cdef class CythonLanczosPropagator:
         cdef int i, j
         cdef c128 fac
         cdef double ang
-        cdef f64[::1] alpha = self.alpha
-        cdef f64[::1] beta = self.beta
-        cdef f64[::1] d_buf = self.coeff_d_buf
-        cdef f64[::1] e_buf = self.coeff_e_buf
-        cdef f64[:, ::1] z_buf = self.coeff_z_buf
-        cdef f64[::1] work_buf = self.coeff_work_buf
-        cdef int[::1] iwork_buf = self.coeff_iwork_buf
+        cdef f64[::1] alpha_v = self.alpha
+        cdef f64[::1] beta_v = self.beta
 
-        for i in range(n):
-            d_buf[i] = alpha[i]
-        for i in range(n - 1):
-            e_buf[i] = beta[i + 1]
+        self.coeff_d_buf[:n] = alpha_v[:n]
+        self.coeff_e_buf[:n - 1] = beta_v[1:n]
 
         lapack.dstevd(&jobz, &n,
-                      &d_buf[0], &e_buf[0],
-                      &z_buf[0, 0], &ldz,
-                      &work_buf[0], &lwork,
-                      &iwork_buf[0], &liwork,
+                      &self.coeff_d_buf[0], &self.coeff_e_buf[0],
+                      &self.coeff_z_buf[0, 0], &ldz,
+                      &self.coeff_work_buf[0], &lwork,
+                      &self.coeff_iwork_buf[0], &liwork,
                       &info)
         if info != 0:
             raise RuntimeError(f"dstevd failed with info={info}")
@@ -211,10 +201,10 @@ cdef class CythonLanczosPropagator:
         for i in range(step + 1):
             coeff[i] = 0.0
         for i in range(n):
-            ang = -HT * d_buf[i]
-            fac = z_buf[i, 0] * (cos(ang) + 1j * sin(ang))
+            ang = -HT * self.coeff_d_buf[i]
+            fac = self.coeff_z_buf[i, 0] * (cos(ang) + 1j * sin(ang))
             for j in range(n):
-                coeff[j] = coeff[j] + z_buf[i, j] * fac
+                coeff[j] = coeff[j] + self.coeff_z_buf[i, j] * fac
 
     cdef double _step(self, double HT):
         cdef int step, ii, jj, n
@@ -229,9 +219,6 @@ cdef class CythonLanczosPropagator:
 
         cdef c128[:, ::1] phia_v = self.phia
         cdef cnp.ndarray[c128, ndim=2, mode='fortran'] H_dense_f
-        cdef c128[::1] H_data_v
-        cdef i64[::1] H_indices_v
-        cdef i64[::1] H_indptr_v
         cdef f64[::1] alpha_v = self.alpha
         cdef f64[::1] beta_v = self.beta
         cdef f64[::1] prefacs_v = self.prefacs
@@ -251,10 +238,6 @@ cdef class CythonLanczosPropagator:
                 lda = n
                 alpha_blas = 1.0 + 0.0j
                 beta_blas = 0.0 + 0.0j
-        else:
-            H_data_v = self.H_data
-            H_indices_v = self.H_indices
-            H_indptr_v = self.H_indptr
 
         phinorm = _vnorm(phia_v[0])
         prefacs_v[0] = 1.0 / phinorm
@@ -264,21 +247,21 @@ cdef class CythonLanczosPropagator:
 
         for step in range(1, self.maxsteps + 1):
             if self.profile_enabled:
-                t0 = self.timer()
+                t0 = time.perf_counter()
             if self.is_csr:
-                _csr_matvec(H_data_v, H_indices_v, H_indptr_v, phia_v[step - 1], phia_v[step])
+                _csr_matvec(self.H_data, self.H_indices, self.H_indptr, phia_v[step - 1], phia_v[step])
             else:
                 if self.use_numpy_matmul:
-                    self.phia_rows[step][:] = self.H_dense @ self.phia_rows[step - 1]
+                    self.phia[step, :] = self.H_dense @ self.phia[step - 1, :]
                 elif self.use_numpy_dot:
-                    self.phia_rows[step][:] = self.H_dense.dot(self.phia_rows[step - 1])
+                    self.phia[step, :] = self.H_dense.dot(self.phia[step - 1, :])
                 else:
                     blas.zgemv(&trans, &m, &ncol, &alpha_blas, &H_dense_f[0, 0], &lda, &phia_v[step - 1, 0], &incx, &beta_blas, &phia_v[step, 0], &incy)
             if self.profile_enabled:
-                self.profile_matvec += self.timer() - t0
+                self.profile_matvec += time.perf_counter() - t0
 
             if self.profile_enabled:
-                t0 = self.timer()
+                t0 = time.perf_counter()
             prefacs_v[step] = prefacs_v[step - 1]
             phinorm = prefacs_v[step] * _vnorm(phia_v[step])
 
@@ -325,14 +308,14 @@ cdef class CythonLanczosPropagator:
                         phia_v[step, jj] *= s
                 prefacs_v[step] = 1.0
             if self.profile_enabled:
-                self.profile_update += self.timer() - t0
+                self.profile_update += time.perf_counter() - t0
 
             self.prev_coeff[:] = self.curr_coeff
             if self.profile_enabled:
-                t0 = self.timer()
+                t0 = time.perf_counter()
             self._calc_coeff(step, HT_done, curr_v)
             if self.profile_enabled:
-                self.profile_coeff += self.timer() - t0
+                self.profile_coeff += time.perf_counter() - t0
                 self.profile_coeff_calls += 1
             convg = _coeff_diff_norm(curr_v, prev_v)
             if (not self.do_full_order) and convg < self.target_convg:
@@ -344,16 +327,16 @@ cdef class CythonLanczosPropagator:
                 scale = 0.5
             HT_done = HT_done * scale
             if self.profile_enabled:
-                t0 = self.timer()
+                t0 = time.perf_counter()
             self._calc_coeff(step - 1, HT_done, prev_v)
             self._calc_coeff(step, HT_done, curr_v)
             if self.profile_enabled:
-                self.profile_coeff += self.timer() - t0
+                self.profile_coeff += time.perf_counter() - t0
                 self.profile_coeff_calls += 2
             convg = _coeff_diff_norm(curr_v, prev_v)
 
         if self.profile_enabled:
-            t0 = self.timer()
+            t0 = time.perf_counter()
         s = curr_v[0]
         if not self.is_csr:
             blas.zscal(&vec_n, &s, &phia_v[0, 0], &incx)
@@ -368,7 +351,7 @@ cdef class CythonLanczosPropagator:
                 for jj in range(n):
                     phia_v[0, jj] += s * phia_v[ii, jj]
         if self.profile_enabled:
-            self.profile_reconstruct += self.timer() - t0
+            self.profile_reconstruct += time.perf_counter() - t0
 
         return HT_done
 
