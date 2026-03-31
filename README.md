@@ -11,11 +11,9 @@ The `jftools.short_iterative_lanczos` solver now supports backend auto-dispatch 
 
 Select backend behavior with the `backend` function argument:
 
-- `auto` (default): choose the best available backend for the Hamiltonian type.
+- `auto` (default): choose the best available backend.
 - `python`: force the original Python implementation.
 - `cython`: force Cython backend (requires compiled extension).
-
-If an explicit backend does not match the Hamiltonian type (or is unavailable), the solver raises an error.
 
 Example:
 
@@ -42,16 +40,14 @@ For a non-editable local install through uv:
 uv run python -m pip install .
 ```
 
-After building, `auto` prefers `cython` for static dense and CSR Hamiltonians.
+After building, `auto` prefers `cython`.
 
 ## QuTiP Compatibility
 
 Short iterative Lanczos targets modern QuTiP (5.x):
 
 - QuTiP Hamiltonians are converted through `H.data.as_scipy()` when available.
-- When the Cython extension is built, the QuTiP 5 sparse data path uses direct Cython cimports of QuTiP's data-layer CSR matvec implementation.
 - QuTiP state outputs preserve `dims` and state shape.
-- Tests skip QuTiP-specific checks if QuTiP is not installed.
 
 ## Publishing
 
