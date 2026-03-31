@@ -1,7 +1,7 @@
 project(
   'jftools',
   ['cpp', 'cython'],
-  version: '0.4.2',
+  version: run_command('cat', 'jftools/_version.txt', check: true).stdout().strip(),
   meson_version: '>=1.4.0',
   default_options: ['warning_level=2', 'cython_language=cpp']
 )
@@ -39,6 +39,7 @@ py.extension_module(
 py.install_sources(
   [
     'jftools/__init__.py',
+    'jftools/_version.txt',
     'jftools/fedvr.py',
     'jftools/interpolate.py',
     'jftools/ipynbimport.py',
