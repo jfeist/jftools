@@ -47,6 +47,7 @@ py.install_sources(
     'jftools/plotting.py',
     'jftools/shade_color.py',
     'jftools/short_iterative_lanczos.py',
+      'jftools/short_iterative_lanczos_numba.py',
     'jftools/tictoc.py',
     'jftools/unroll_phase.py',
   ],

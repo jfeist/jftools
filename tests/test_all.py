@@ -107,8 +107,8 @@ def test_short_iterative_lanczos_dense_and_sparse_against_expm_multiply():
 
     prop_dense = jftools.short_iterative_lanczos.lanczos_timeprop(H_dense, maxsteps=14, target_convg=1e-12)
     prop_sparse = jftools.short_iterative_lanczos.lanczos_timeprop(H_sparse, maxsteps=14, target_convg=1e-12)
-    assert prop_dense.backend in ("python", "cython")
-    assert prop_sparse.backend in ("python", "cython")
+    assert prop_dense.backend in ("python", "numba", "cython")
+    assert prop_sparse.backend in ("python", "numba", "cython")
 
     phis_dense = _run_sil(H_dense, phi0, ts)
     phis_sparse = _run_sil(H_sparse, phi0, ts)
@@ -200,8 +200,10 @@ def test_short_iterative_lanczos_time_dependent_callable_regression():
 
 
 @pytest.mark.parametrize("n", [1, 2, 3])
-@pytest.mark.parametrize("backend", ["python", "cython"])
+@pytest.mark.parametrize("backend", ["python", "numba", "cython"])
 def test_short_iterative_lanczos_small_dense_diagonal_exact(backend, n):
+    if backend == "numba" and not jftools.short_iterative_lanczos.have_numba_backend:
+        pytest.skip("numba backend not available")
     if backend == "cython" and not jftools.short_iterative_lanczos.have_cython_backend:
         pytest.skip("cython backend not available")
 
@@ -261,8 +263,10 @@ def test_short_iterative_lanczos_small_callable_diagonal_exact(backend):
         assert np.allclose(phi, phi_ref, rtol=2e-4, atol=1e-6)
 
 
-@pytest.mark.parametrize("backend", ["python", "cython"])
+@pytest.mark.parametrize("backend", ["python", "numba", "cython"])
 def test_short_iterative_lanczos_full_basis_completion_stops_cleanly(backend):
+    if backend == "numba" and not jftools.short_iterative_lanczos.have_numba_backend:
+        pytest.skip("numba backend not available")
     if backend == "cython" and not jftools.short_iterative_lanczos.have_cython_backend:
         pytest.skip("cython backend not available")
 
@@ -303,7 +307,7 @@ def test_short_iterative_lanczos_qutip_h_and_state_compatibility():
 
     phi_np = _normalized_random_state(n, seed=4)
     prop_qobj = jftools.short_iterative_lanczos.lanczos_timeprop(H_qobj, maxsteps=14, target_convg=1e-12)
-    assert prop_qobj.backend in ("python", "cython")
+    assert prop_qobj.backend in ("python", "numba", "cython")
 
     out_np = _run_sil(H_qobj, phi_np, ts)
     assert isinstance(out_np[-1], np.ndarray)
@@ -328,6 +332,32 @@ def test_short_iterative_lanczos_explicit_python_allowed_for_callable():
 
     prop = jftools.short_iterative_lanczos.lanczos_timeprop(Hfun, maxsteps=8, target_convg=1e-12, backend="python")
     assert prop.backend == "python"
+
+
+def test_short_iterative_lanczos_explicit_numba_requires_static_operator():
+    if not jftools.short_iterative_lanczos.have_numba_backend:
+        pytest.skip("numba backend not available")
+
+    def Hfun(t, phi, Hphi):
+        Hphi[:] = phi
+        return Hphi
+
+    with pytest.raises(ValueError, match="backend='numba' only supports static dense numpy arrays and scipy CSR matrices"):
+        jftools.short_iterative_lanczos.lanczos_timeprop(Hfun, maxsteps=8, target_convg=1e-12, backend="numba")
+
+
+def test_short_iterative_lanczos_auto_prefers_numba_for_static_dense_and_csr():
+    if not jftools.short_iterative_lanczos.have_numba_backend:
+        pytest.skip("numba backend not available")
+
+    H_csr = _make_chain_hamiltonian(8)
+    H_dense = H_csr.toarray().astype(complex)
+
+    prop_dense = jftools.short_iterative_lanczos.lanczos_timeprop(H_dense, maxsteps=8, target_convg=1e-12, backend="auto")
+    prop_csr = jftools.short_iterative_lanczos.lanczos_timeprop(H_csr, maxsteps=8, target_convg=1e-12, backend="auto")
+
+    assert prop_dense.backend == "numba"
+    assert prop_csr.backend == "numba"
 
 
 def test_short_iterative_lanczos_explicit_cython_callable_needs_no_dim():

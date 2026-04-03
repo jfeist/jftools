@@ -15,6 +15,14 @@ except ImportError:
     have_cython_backend = False
 
 try:
+    from .short_iterative_lanczos_numba import _lanczos_timeprop_numba
+
+    have_numba_backend = True
+except ImportError:
+    _lanczos_timeprop_numba = None
+    have_numba_backend = False
+
+try:
     import qutip
 
     have_qutip = True
@@ -278,14 +286,23 @@ def _select_backend(H, backend):
     if backend == "python":
         return "python"
 
+    if backend == "numba":
+        if not have_numba_backend:
+            raise ValueError("backend='numba' requested but Numba backend is not available.")
+        if not (_is_dense_matrix(H) or _is_csr_matrix(H)):
+            raise ValueError("backend='numba' only supports static dense numpy arrays and scipy CSR matrices.")
+        return "numba"
+
     if backend == "cython":
         if not have_cython_backend:
             raise ValueError("backend='cython' requested but Cython backend extension is not available.")
         return "cython"
 
     if backend != "auto":
-        raise ValueError("Unknown backend value '%s'. Valid values are 'python', 'cython', 'auto'." % backend)
+        raise ValueError("Unknown backend value '%s'. Valid values are 'python', 'numba', 'cython', 'auto'." % backend)
 
+    if have_numba_backend and (_is_dense_matrix(H) or _is_csr_matrix(H)):
+        return "numba"
     if have_cython_backend:
         return "cython"
     return "python"
@@ -296,7 +313,9 @@ class lanczos_timeprop:
         if have_qutip and isinstance(H, qutip.Qobj):
             H = _qobj_to_matrix(H)
         self.backend = _select_backend(H, backend)
-        if self.backend == "cython":
+        if self.backend == "numba":
+            self._impl = _lanczos_timeprop_numba(H, maxsteps, target_convg, debug, do_full_order)
+        elif self.backend == "cython":
             if not (_is_dense_matrix(H) or _is_csr_matrix(H)):
                 H = _as_hfun(H)
 

@@ -19,6 +19,7 @@ dependencies = [
     "IPython >=8.18",
     "matplotlib >=3.8",
     "qutip>=5.0",
+    "numba-lapack",
 ]
 
 [project.urls]
@@ -44,3 +45,6 @@ skip = ["pp*", "*-win32", "*-manylinux_i686", "*-musllinux_*"]
 build-verbosity = 1
 test-requires = ["pytest>=8.3"]
 test-command = "pytest {project}/tests -q"
+
+[tool.uv.sources]
+numba-lapack = { git = "https://github.com/MTZ-dev/numba-lapack.git" }
