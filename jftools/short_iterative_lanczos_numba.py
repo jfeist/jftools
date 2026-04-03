@@ -69,37 +69,21 @@ def _calc_coeff_numba(step, alpha, beta, HT, coeff, eigvecs, diag_work, offdiag_
     if step <= 0:
         return
 
-    for idx in range(step):
-        diag_work[idx] = alpha[idx]
-    for idx in range(step - 1):
-        offdiag_work[idx] = beta[idx]
+    diag_work[:step] = alpha[:step]
+    offdiag_work[:step - 1] = beta[:step - 1]
 
-    work = lapack_work[:1 + 4 * step + step * step]
-    iwork = lapack_iwork[:3 + 5 * step]
+    # work = lapack_work[:1 + 4 * step + step * step]
+    # iwork = lapack_iwork[:3 + 5 * step]
     lapack_info[0] = 0
-    dstevd(
-        np.uint8(ord("V")),
-        step,
-        diag_work,
-        offdiag_work,
-        eigvecs,
-        max(1, eigvecs.shape[0]),
-        work,
-        work.shape[0],
-        iwork,
-        iwork.shape[0],
-        lapack_info,
-    )
+    dstevd(np.uint8(ord("V")), step, diag_work, offdiag_work, eigvecs, eigvecs.shape[0],
+           lapack_work, lapack_work.shape[0], lapack_iwork, lapack_iwork.shape[0], lapack_info)
     if lapack_info[0] != 0:
         raise ValueError("dstevd failed in Numba Lanczos backend")
 
-    vals = diag_work
-    vecs = eigvecs
     for idx in range(step):
-        angle = -HT * vals[idx]
-        factor = vecs[0, idx] * (np.cos(angle) + 1j * np.sin(angle))
+        factor = eigvecs[0, idx] * np.exp(-1j * HT * diag_work[idx])
         for jdx in range(step):
-            coeff[jdx] += vecs[jdx, idx] * factor
+            coeff[jdx] += eigvecs[jdx, idx] * factor
 
 
 @njit(cache=True)
@@ -323,51 +307,6 @@ class _lanczos_timeprop_numba:
         self.lapack_iwork = np.empty(3 + 5 * maxsteps, dtype=np.int32)
         self.lapack_info = np.zeros(1, dtype=np.int32)
 
-    def _step(self, t, HT):
-        _ = t
-        if self.kind == "dense":
-            return _step_dense_numba(
-                self.H_dense,
-                HT,
-                self.maxsteps,
-                self.target_convg,
-                self.do_full_order,
-                self.breakdown_tol,
-                self.alpha,
-                self.beta,
-                self.prefacs,
-                self.curr_coeff,
-                self.prev_coeff,
-                self.phia,
-                self.eigvecs,
-                self.diag_work,
-                self.offdiag_work,
-                self.lapack_work,
-                self.lapack_iwork,
-                self.lapack_info,
-            )
-        return _step_csr_numba(
-            self.H_data,
-            self.H_indices,
-            self.H_indptr,
-            HT,
-            self.maxsteps,
-            self.target_convg,
-            self.do_full_order,
-            self.breakdown_tol,
-            self.alpha,
-            self.beta,
-            self.prefacs,
-            self.curr_coeff,
-            self.prev_coeff,
-            self.phia,
-            self.eigvecs,
-            self.diag_work,
-            self.offdiag_work,
-            self.lapack_work,
-            self.lapack_iwork,
-            self.lapack_info,
-        )
 
     def propagate(self, phi0, ts, maxHT=None):
         phi0 = np.asarray(phi0, dtype=np.complex128)
