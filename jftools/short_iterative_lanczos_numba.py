@@ -64,7 +64,8 @@ def _dense_gemm_matvec_numba(H, x, y):
 
 
 @njit(cache=True)
-def _apply_static_matvec_numba(use_csr, H_dense, data, indices, indptr, x, y):
+def _apply_static_matvec_numba(operator, x, y):
+    use_csr, H_dense, data, indices, indptr = operator
     if use_csr:
         _csr_matvec_numba(data, indices, indptr, x, y)
     else:
@@ -72,7 +73,8 @@ def _apply_static_matvec_numba(use_csr, H_dense, data, indices, indptr, x, y):
 
 
 @njit(cache=True)
-def _calc_coeff_numba(step, alpha, beta, HT, coeff, eigvecs, diag_work, offdiag_work, lapack_work, lapack_iwork, lapack_info):
+def _calc_coeff_numba(step, HT, coeff, scratch):
+    alpha, beta, _, _, _, _, eigvecs, diag_work, offdiag_work, lapack_work, lapack_iwork, lapack_info = scratch
     coeff[:] = 0.0 + 0.0j
     if step <= 0:
         return
@@ -80,8 +82,6 @@ def _calc_coeff_numba(step, alpha, beta, HT, coeff, eigvecs, diag_work, offdiag_
     diag_work[:step] = alpha[:step]
     offdiag_work[:step - 1] = beta[:step - 1]
 
-    # work = lapack_work[:1 + 4 * step + step * step]
-    # iwork = lapack_iwork[:3 + 5 * step]
     lapack_info[0] = 0
     dstevd(np.uint8(ord("V")), step, diag_work, offdiag_work, eigvecs, eigvecs.shape[0],
            lapack_work, lapack_work.shape[0], lapack_iwork, lapack_iwork.shape[0], lapack_info)
@@ -95,7 +95,9 @@ def _calc_coeff_numba(step, alpha, beta, HT, coeff, eigvecs, diag_work, offdiag_
 
 
 @njit(cache=True)
-def _step_static_numba(use_csr, H_dense, data, indices, indptr, HT, maxsteps, target_convg, do_full_order, breakdown_tol, alpha, beta, prefacs, curr_coeff, prev_coeff, phia, eigvecs, diag_work, offdiag_work, lapack_work, lapack_iwork, lapack_info):
+def _step_static_numba(operator, HT, config, scratch):
+    maxsteps, target_convg, do_full_order, breakdown_tol = config
+    alpha, beta, prefacs, curr_coeff, prev_coeff, phia, _, _, _, _, _, _ = scratch
     max_lanczos_steps = min(maxsteps, phia.shape[1])
     HT_done = HT
 
@@ -109,7 +111,7 @@ def _step_static_numba(use_csr, H_dense, data, indices, indptr, HT, maxsteps, ta
 
     for step in range(1, max_lanczos_steps + 1):
         step_count = step
-        _apply_static_matvec_numba(use_csr, H_dense, data, indices, indptr, phia[step - 1], phia[step])
+        _apply_static_matvec_numba(operator, phia[step - 1], phia[step])
         prefacs[step] = prefacs[step - 1]
         phinorm = prefacs[step] * _vnorm_numba(phia[step])
 
@@ -141,7 +143,7 @@ def _step_static_numba(use_csr, H_dense, data, indices, indptr, HT, maxsteps, ta
                 prefacs[step] = 1.0
 
         prev_coeff[:] = curr_coeff
-        _calc_coeff_numba(step, alpha, beta, HT_done, curr_coeff, eigvecs, diag_work, offdiag_work, lapack_work, lapack_iwork, lapack_info)
+        _calc_coeff_numba(step, HT_done, curr_coeff, scratch)
         convg = _coeff_diff_norm_numba(curr_coeff, prev_coeff, step)
 
         if exact_complete or step == max_lanczos_steps:
@@ -154,8 +156,8 @@ def _step_static_numba(use_csr, H_dense, data, indices, indptr, HT, maxsteps, ta
         if scale < 0.5:
             scale = 0.5
         HT_done *= scale
-        _calc_coeff_numba(step_count - 1, alpha, beta, HT_done, prev_coeff, eigvecs, diag_work, offdiag_work, lapack_work, lapack_iwork, lapack_info)
-        _calc_coeff_numba(step_count, alpha, beta, HT_done, curr_coeff, eigvecs, diag_work, offdiag_work, lapack_work, lapack_iwork, lapack_info)
+        _calc_coeff_numba(step_count - 1, HT_done, prev_coeff, scratch)
+        _calc_coeff_numba(step_count, HT_done, curr_coeff, scratch)
         convg = _coeff_diff_norm_numba(curr_coeff, prev_coeff, step_count)
 
     _scal_numba(curr_coeff[0], phia[0])
@@ -167,7 +169,8 @@ def _step_static_numba(use_csr, H_dense, data, indices, indptr, HT, maxsteps, ta
 
 
 @njit(cache=True)
-def _propagate_static_numba(use_csr, H_dense, data, indices, indptr, ts, use_maxht, maxht_value, maxsteps, target_convg, do_full_order, breakdown_tol, alpha, beta, prefacs, curr_coeff, prev_coeff, phia, eigvecs, diag_work, offdiag_work, lapack_work, lapack_iwork, lapack_info, out):
+def _propagate_static_numba(operator, ts, use_maxht, maxht_value, config, scratch, out):
+    _, _, _, _, _, phia, _, _, _, _, _, _ = scratch
     tt = ts[0]
     out[0, :] = phia[0, :]
     for out_idx in range(1, ts.shape[0]):
@@ -176,7 +179,7 @@ def _propagate_static_numba(use_csr, H_dense, data, indices, indptr, ts, use_max
             HT = tf - tt
             if use_maxht and HT > maxht_value:
                 HT = maxht_value
-            HT_done = _step_static_numba(use_csr, H_dense, data, indices, indptr, HT, maxsteps, target_convg, do_full_order, breakdown_tol, alpha, beta, prefacs, curr_coeff, prev_coeff, phia, eigvecs, diag_work, offdiag_work, lapack_work, lapack_iwork, lapack_info)
+            HT_done = _step_static_numba(operator, HT, config, scratch)
             if not np.isfinite(HT_done) or HT_done <= 0.0:
                 raise ValueError("Numba Lanczos backend produced a non-positive propagation step")
             tt += HT_done
@@ -187,12 +190,14 @@ def _normalize_static_operator(H):
     if sp.isspmatrix_csr(H) or (hasattr(sp, "csr_array") and isinstance(H, sp.csr_array)):
         H_csr = sp.csr_matrix(H).astype(np.complex128)
         return (
-            True,
             H_csr.shape[0],
-            np.empty((0, 0), dtype=np.complex128, order="F"),
-            np.asarray(H_csr.data, dtype=np.complex128),
-            np.asarray(H_csr.indices, dtype=np.int64),
-            np.asarray(H_csr.indptr, dtype=np.int64),
+            (
+                True,
+                np.empty((0, 0), dtype=np.complex128, order="F"),
+                np.asarray(H_csr.data, dtype=np.complex128),
+                np.asarray(H_csr.indices, dtype=np.int64),
+                np.asarray(H_csr.indptr, dtype=np.int64),
+            ),
         )
 
     H_dense = np.asfortranarray(H, dtype=np.complex128)
@@ -200,12 +205,14 @@ def _normalize_static_operator(H):
         raise TypeError("Numba Lanczos backend only supports static dense numpy arrays and scipy CSR matrices")
 
     return (
-        False,
         H_dense.shape[0],
-        H_dense,
-        np.empty(0, dtype=np.complex128),
-        np.empty(0, dtype=np.int64),
-        np.empty(0, dtype=np.int64),
+        (
+            False,
+            H_dense,
+            np.empty(0, dtype=np.complex128),
+            np.empty(0, dtype=np.int64),
+            np.empty(0, dtype=np.int64),
+        ),
     )
 
 
@@ -219,21 +226,24 @@ class _lanczos_timeprop_numba:
         self.debug = debug
         self.do_full_order = do_full_order
         self.breakdown_tol = 1e-14
+        self.config = (maxsteps, target_convg, do_full_order, self.breakdown_tol)
 
-        self.use_csr, self.dim, self.H_dense, self.H_data, self.H_indices, self.H_indptr = _normalize_static_operator(H)
+        self.dim, self.operator = _normalize_static_operator(H)
 
-        self.alpha = np.empty(maxsteps + 1, dtype=np.float64)
-        self.beta = np.empty(maxsteps, dtype=np.float64)
-        self.prefacs = np.empty(maxsteps + 1, dtype=np.float64)
-        self.curr_coeff = np.empty(maxsteps + 1, dtype=np.complex128)
-        self.prev_coeff = np.empty(maxsteps + 1, dtype=np.complex128)
-        self.phia = np.empty((maxsteps + 1, self.dim), dtype=np.complex128)
-        self.eigvecs = np.asfortranarray(np.empty((maxsteps, maxsteps), dtype=np.float64))
-        self.diag_work = np.empty(maxsteps, dtype=np.float64)
-        self.offdiag_work = np.empty(maxsteps - 1, dtype=np.float64)
-        self.lapack_work = np.empty(1 + 4 * maxsteps + maxsteps * maxsteps, dtype=np.float64)
-        self.lapack_iwork = np.empty(3 + 5 * maxsteps, dtype=np.int32)
-        self.lapack_info = np.zeros(1, dtype=np.int32)
+        self.scratch = (
+            np.empty(maxsteps + 1, dtype=np.float64),  # alpha diagonal terms
+            np.empty(maxsteps, dtype=np.float64),  # beta off-diagonal terms
+            np.empty(maxsteps + 1, dtype=np.float64),  # normalization prefactors
+            np.empty(maxsteps + 1, dtype=np.complex128),  # current expansion coefficients
+            np.empty(maxsteps + 1, dtype=np.complex128),  # previous expansion coefficients
+            np.empty((maxsteps + 1, self.dim), dtype=np.complex128),  # Lanczos basis vectors
+            np.empty((maxsteps, maxsteps), dtype=np.float64, order="F"),  # tridiagonal eigenvectors (Fortran order)
+            np.empty(maxsteps, dtype=np.float64),  # dstevd diagonal workspace
+            np.empty(maxsteps - 1, dtype=np.float64),  # dstevd off-diagonal workspace
+            np.empty(1 + 4 * maxsteps + maxsteps * maxsteps, dtype=np.float64),  # dstevd work array
+            np.empty(3 + 5 * maxsteps, dtype=np.int32),  # dstevd integer work array
+            np.zeros(1, dtype=np.int32),  # dstevd info flag
+        )
 
 
     def propagate(self, phi0, ts, maxHT=None):
@@ -245,38 +255,13 @@ class _lanczos_timeprop_numba:
 
         ts = np.asarray(ts, dtype=np.float64)
         out = np.empty((ts.shape[0], self.dim), dtype=np.complex128)
-        self.phia.fill(0.0)
-        self.phia[0, :] = phi0
+        self.scratch[5].fill(0.0)
+        self.scratch[5][0, :] = phi0
 
         use_maxht = maxHT is not None
         maxht_value = 0.0 if maxHT is None else float(maxHT)
 
-        _propagate_static_numba(
-            self.use_csr,
-            self.H_dense,
-            self.H_data,
-            self.H_indices,
-            self.H_indptr,
-            ts,
-            use_maxht,
-            maxht_value,
-            self.maxsteps,
-            self.target_convg,
-            self.do_full_order,
-            self.breakdown_tol,
-            self.alpha,
-            self.beta,
-            self.prefacs,
-            self.curr_coeff,
-            self.prev_coeff,
-            self.phia,
-            self.eigvecs,
-            self.diag_work,
-            self.offdiag_work,
-            self.lapack_work,
-            self.lapack_iwork,
-            self.lapack_info,
-            out,
-        )
+        _propagate_static_numba(self.operator, ts, use_maxht, maxht_value,
+                                self.config, self.scratch, out)
 
         return out
