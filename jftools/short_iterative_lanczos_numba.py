@@ -1,7 +1,16 @@
 import numpy as np
-from numba import njit
+from numba import njit, objmode
+from numba.core import types
+from numba.extending import overload
 from numba_lapack import dstevd, zgemm
 from scipy import sparse as sp
+
+_CALLABLE_OPERATOR_REGISTRY = {}
+
+def _register_callable_operator(H):
+    handle = id(H)
+    _CALLABLE_OPERATOR_REGISTRY[handle] = H
+    return handle
 
 
 @njit(cache=True)
@@ -35,41 +44,36 @@ def _axpy_numba(scale, x, y):
         y[idx] += scale * x[idx]
 
 
-@njit(cache=True)
-def _scal_numba(scale, x):
-    for idx in range(x.shape[0]):
-        x[idx] *= scale
+def _apply_H_operator_numba(H, t, x, y):
+    raise NotImplementedError
 
 
-@njit(cache=True)
-def _zero_vec_numba(x):
-    for idx in range(x.shape[0]):
-        x[idx] = 0.0 + 0.0j
+@overload(_apply_H_operator_numba)
+def _overload_apply_H_operator_numba(H, t, x, y):
+    if isinstance(H, types.BaseTuple) and len(H) == 3:
+        def impl(H, t, x, y):
+            data, indices, indptr = H
+            for row in range(indptr.shape[0] - 1):
+                acc = 0.0 + 0.0j
+                for pos in range(indptr[row], indptr[row + 1]):
+                    acc += data[pos] * x[indices[pos]]
+                y[row] = acc
 
+    elif isinstance(H, types.Array):
+        def impl(H, t, x, y):
+            charN = np.uint8(ord("N"))
+            zgemm(charN, charN, H.shape[0], 1, H.shape[1], 1.0 + 0.0j, H,
+                  H.shape[0], x, x.shape[0], 0.0 + 0.0j, y, y.shape[0])
 
-@njit(cache=True)
-def _csr_matvec_numba(data, indices, indptr, x, y):
-    for row in range(indptr.shape[0] - 1):
-        acc = 0.0 + 0.0j
-        for pos in range(indptr[row], indptr[row + 1]):
-            acc += data[pos] * x[indices[pos]]
-        y[row] = acc
+    elif isinstance(H, types.Integer):
+        def impl(H, t, x, y):
+            with objmode():
+                _CALLABLE_OPERATOR_REGISTRY[H](t, x, y)
 
-
-@njit(cache=True)
-def _dense_gemm_matvec_numba(H, x, y):
-    charN = np.uint8(ord("N"))
-    zgemm(charN, charN, H.shape[0], 1, H.shape[1], 1.0 + 0.0j, H,
-          H.shape[0], x, x.shape[0], 0.0 + 0.0j, y, y.shape[0])
-
-
-@njit(cache=True)
-def _apply_static_matvec_numba(operator, x, y):
-    use_csr, H_dense, data, indices, indptr = operator
-    if use_csr:
-        _csr_matvec_numba(data, indices, indptr, x, y)
     else:
-        _dense_gemm_matvec_numba(H_dense, x, y)
+        raise TypeError("Numba Lanczos operator must be dense array, CSR tuple, or callable handle")
+
+    return impl
 
 
 @njit(cache=True)
@@ -95,7 +99,7 @@ def _calc_coeff_numba(step, HT, coeff, scratch):
 
 
 @njit(cache=True)
-def _step_static_numba(operator, HT, config, scratch):
+def _step_numba(operator, t, HT, config, scratch):
     maxsteps, target_convg, do_full_order, breakdown_tol = config
     alpha, beta, prefacs, curr_coeff, prev_coeff, phia, _, _, _, _, _, _ = scratch
     max_lanczos_steps = min(maxsteps, phia.shape[1])
@@ -111,7 +115,7 @@ def _step_static_numba(operator, HT, config, scratch):
 
     for step in range(1, max_lanczos_steps + 1):
         step_count = step
-        _apply_static_matvec_numba(operator, phia[step - 1], phia[step])
+        _apply_H_operator_numba(operator, t, phia[step - 1], phia[step])
         prefacs[step] = prefacs[step - 1]
         phinorm = prefacs[step] * _vnorm_numba(phia[step])
 
@@ -134,12 +138,12 @@ def _step_static_numba(operator, HT, config, scratch):
         beta[step - 1] = prefacs[step] * phinorm
         if phinorm <= breakdown_tol:
             prefacs[step] = 1.0
-            _zero_vec_numba(phia[step])
+            phia[step] = 0.
             exact_complete = True
         else:
             prefacs[step] = 1.0 / phinorm
             if abs(np.log10(prefacs[step])) > 4.0:
-                _scal_numba(prefacs[step], phia[step])
+                phia[step] *= prefacs[step]
                 prefacs[step] = 1.0
 
         prev_coeff[:] = curr_coeff
@@ -160,7 +164,7 @@ def _step_static_numba(operator, HT, config, scratch):
         _calc_coeff_numba(step_count, HT_done, curr_coeff, scratch)
         convg = _coeff_diff_norm_numba(curr_coeff, prev_coeff, step_count)
 
-    _scal_numba(curr_coeff[0], phia[0])
+    phia[0] *= curr_coeff[0]
     for idx in range(1, step_count):
         scale = curr_coeff[idx] * prefacs[idx] / prefacs[0]
         _axpy_numba(scale, phia[idx], phia[0])
@@ -169,7 +173,7 @@ def _step_static_numba(operator, HT, config, scratch):
 
 
 @njit(cache=True)
-def _propagate_static_numba(operator, ts, use_maxht, maxht_value, config, scratch, out):
+def _propagate_numba(operator, ts, use_maxht, maxht_value, config, scratch, out):
     _, _, _, _, _, phia, _, _, _, _, _, _ = scratch
     tt = ts[0]
     out[0, :] = phia[0, :]
@@ -179,7 +183,7 @@ def _propagate_static_numba(operator, ts, use_maxht, maxht_value, config, scratc
             HT = tf - tt
             if use_maxht and HT > maxht_value:
                 HT = maxht_value
-            HT_done = _step_static_numba(operator, HT, config, scratch)
+            HT_done = _step_numba(operator, tt, HT, config, scratch)
             if not np.isfinite(HT_done) or HT_done <= 0.0:
                 raise ValueError("Numba Lanczos backend produced a non-positive propagation step")
             tt += HT_done
@@ -191,67 +195,68 @@ def _normalize_static_operator(H):
         H_csr = sp.csr_matrix(H).astype(np.complex128)
         return (
             H_csr.shape[0],
-            (
-                True,
-                np.empty((0, 0), dtype=np.complex128, order="F"),
-                np.asarray(H_csr.data, dtype=np.complex128),
-                np.asarray(H_csr.indices, dtype=np.int64),
-                np.asarray(H_csr.indptr, dtype=np.int64),
-            ),
+            (H_csr.data, H_csr.indices.astype(np.int64), H_csr.indptr.astype(np.int64))
         )
 
     H_dense = np.asfortranarray(H, dtype=np.complex128)
     if H_dense.ndim != 2 or H_dense.shape[0] != H_dense.shape[1]:
         raise TypeError("Numba Lanczos backend only supports static dense numpy arrays and scipy CSR matrices")
 
+    return (H_dense.shape[0], H_dense)
+
+
+def _allocate_scratch(maxsteps, dim):
     return (
-        H_dense.shape[0],
-        (
-            False,
-            H_dense,
-            np.empty(0, dtype=np.complex128),
-            np.empty(0, dtype=np.int64),
-            np.empty(0, dtype=np.int64),
-        ),
+        np.empty(maxsteps + 1, dtype=np.float64),  # alpha diagonal terms
+        np.empty(maxsteps, dtype=np.float64),  # beta off-diagonal terms
+        np.empty(maxsteps + 1, dtype=np.float64),  # normalization prefactors
+        np.empty(maxsteps + 1, dtype=np.complex128),  # current expansion coefficients
+        np.empty(maxsteps + 1, dtype=np.complex128),  # previous expansion coefficients
+        np.empty((maxsteps + 1, dim), dtype=np.complex128),  # Lanczos basis vectors
+        np.empty((maxsteps, maxsteps), dtype=np.float64, order="F"),  # tridiagonal eigenvectors (Fortran order)
+        np.empty(maxsteps, dtype=np.float64),  # dstevd diagonal workspace
+        np.empty(maxsteps - 1, dtype=np.float64),  # dstevd off-diagonal workspace
+        np.empty(1 + 4 * maxsteps + maxsteps * maxsteps, dtype=np.float64),  # dstevd work array
+        np.empty(3 + 5 * maxsteps, dtype=np.int32),  # dstevd integer work array
+        np.zeros(1, dtype=np.int32),  # dstevd info flag
     )
 
 
 class _lanczos_timeprop_numba:
     def __init__(self, H, maxsteps, target_convg, debug=0, do_full_order=False):
-        if callable(H):
-            raise TypeError("Numba Lanczos backend only supports static dense numpy arrays and scipy CSR matrices")
-
         self.maxsteps = maxsteps
         self.target_convg = target_convg
         self.debug = debug
         self.do_full_order = do_full_order
         self.breakdown_tol = 1e-14
         self.config = (maxsteps, target_convg, do_full_order, self.breakdown_tol)
+        self.H = H
 
-        self.dim, self.operator = _normalize_static_operator(H)
+        if callable(H):
+            self.operator = _register_callable_operator(H)
+            self.dim = None
+            self.scratch = None
+        else:
+            self.dim, self.operator = _normalize_static_operator(H)
+            self.scratch = _allocate_scratch(maxsteps, self.dim)
 
-        self.scratch = (
-            np.empty(maxsteps + 1, dtype=np.float64),  # alpha diagonal terms
-            np.empty(maxsteps, dtype=np.float64),  # beta off-diagonal terms
-            np.empty(maxsteps + 1, dtype=np.float64),  # normalization prefactors
-            np.empty(maxsteps + 1, dtype=np.complex128),  # current expansion coefficients
-            np.empty(maxsteps + 1, dtype=np.complex128),  # previous expansion coefficients
-            np.empty((maxsteps + 1, self.dim), dtype=np.complex128),  # Lanczos basis vectors
-            np.empty((maxsteps, maxsteps), dtype=np.float64, order="F"),  # tridiagonal eigenvectors (Fortran order)
-            np.empty(maxsteps, dtype=np.float64),  # dstevd diagonal workspace
-            np.empty(maxsteps - 1, dtype=np.float64),  # dstevd off-diagonal workspace
-            np.empty(1 + 4 * maxsteps + maxsteps * maxsteps, dtype=np.float64),  # dstevd work array
-            np.empty(3 + 5 * maxsteps, dtype=np.int32),  # dstevd integer work array
-            np.zeros(1, dtype=np.int32),  # dstevd info flag
-        )
-
+    def __del__(self):
+        if callable(self.H) and self.operator in _CALLABLE_OPERATOR_REGISTRY:
+            del _CALLABLE_OPERATOR_REGISTRY[self.operator]
 
     def propagate(self, phi0, ts, maxHT=None):
         phi0 = np.asarray(phi0, dtype=np.complex128)
         if phi0.ndim != 1:
             raise ValueError("phi0 must be a 1d complex array")
-        if phi0.shape[0] != self.dim:
-            raise ValueError("State dimension does not match Hamiltonian dimension")
+
+        if self.dim is None:
+            if not callable(self.H):
+                raise ValueError("Internal error: non-callable operator should have dimension set")
+            self.dim = phi0.shape[0]
+            self.scratch = _allocate_scratch(self.maxsteps, self.dim)
+        else:
+            if phi0.shape[0] != self.dim:
+                raise ValueError("State dimension does not match Hamiltonian dimension")
 
         ts = np.asarray(ts, dtype=np.float64)
         out = np.empty((ts.shape[0], self.dim), dtype=np.complex128)
@@ -261,7 +266,6 @@ class _lanczos_timeprop_numba:
         use_maxht = maxHT is not None
         maxht_value = 0.0 if maxHT is None else float(maxHT)
 
-        _propagate_static_numba(self.operator, ts, use_maxht, maxht_value,
-                                self.config, self.scratch, out)
+        _propagate_numba(self.operator, ts, use_maxht, maxht_value, self.config, self.scratch, out)
 
         return out

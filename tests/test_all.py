@@ -227,8 +227,10 @@ def test_short_iterative_lanczos_small_dense_diagonal_exact(backend, n):
         assert np.allclose(phi, phi_ref, rtol=5e-11, atol=5e-13)
 
 
-@pytest.mark.parametrize("backend", ["python", "cython"])
+@pytest.mark.parametrize("backend", ["python", "numba", "cython"])
 def test_short_iterative_lanczos_small_callable_diagonal_exact(backend):
+    if backend == "numba" and not jftools.short_iterative_lanczos.have_numba_backend:
+        pytest.skip("numba backend not available")
     if backend == "cython" and not jftools.short_iterative_lanczos.have_cython_backend:
         pytest.skip("cython backend not available")
 
@@ -334,7 +336,7 @@ def test_short_iterative_lanczos_explicit_python_allowed_for_callable():
     assert prop.backend == "python"
 
 
-def test_short_iterative_lanczos_explicit_numba_requires_static_operator():
+def test_short_iterative_lanczos_explicit_numba_allowed_for_callable():
     if not jftools.short_iterative_lanczos.have_numba_backend:
         pytest.skip("numba backend not available")
 
@@ -342,8 +344,8 @@ def test_short_iterative_lanczos_explicit_numba_requires_static_operator():
         Hphi[:] = phi
         return Hphi
 
-    with pytest.raises(ValueError, match="backend='numba' only supports static dense numpy arrays and scipy CSR matrices"):
-        jftools.short_iterative_lanczos.lanczos_timeprop(Hfun, maxsteps=8, target_convg=1e-12, backend="numba")
+    prop = jftools.short_iterative_lanczos.lanczos_timeprop(Hfun, maxsteps=8, target_convg=1e-12, backend="numba")
+    assert prop.backend == "numba"
 
 
 def test_short_iterative_lanczos_auto_prefers_numba_for_static_dense_and_csr():
@@ -396,6 +398,20 @@ def test_short_iterative_lanczos_explicit_cython_unavailable_no_fallback(monkeyp
     monkeypatch.setattr(sil_mod, "have_cython_backend", False)
     with pytest.raises(ValueError, match="backend='cython' requested but Cython backend extension is not available"):
         sil_mod.lanczos_timeprop(H, maxsteps=8, target_convg=1e-12, backend="cython")
+
+
+def test_short_iterative_lanczos_auto_falls_back_to_numba_for_callable(monkeypatch):
+    sil_mod = jftools.short_iterative_lanczos
+    if not sil_mod.have_numba_backend:
+        pytest.skip("numba backend not available")
+
+    def Hfun(t, phi, Hphi):
+        Hphi[:] = phi
+        return Hphi
+
+    monkeypatch.setattr(sil_mod, "have_cython_backend", False)
+    prop = sil_mod.lanczos_timeprop(Hfun, maxsteps=8, target_convg=1e-12, backend="auto")
+    assert prop.backend == "numba"
 
 
 def test_short_iterative_lanczos_auto_prefers_cython_for_linear_operator():

@@ -289,8 +289,6 @@ def _select_backend(H, backend):
     if backend == "numba":
         if not have_numba_backend:
             raise ValueError("backend='numba' requested but Numba backend is not available.")
-        if not (_is_dense_matrix(H) or _is_csr_matrix(H)):
-            raise ValueError("backend='numba' only supports static dense numpy arrays and scipy CSR matrices.")
         return "numba"
 
     if backend == "cython":
@@ -305,6 +303,8 @@ def _select_backend(H, backend):
         return "numba"
     if have_cython_backend:
         return "cython"
+    if have_numba_backend:
+        return "numba"
     return "python"
 
 
