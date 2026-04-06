@@ -1,16 +1,45 @@
 import numpy as np
-from numba import njit, objmode
+from numba import literal_unroll, njit, objmode
 from numba.core import types
+from numba.core.dispatcher import Dispatcher
 from numba.extending import overload
 from numba_lapack import dstevd, zgemm
 from scipy import sparse as sp
 
 _CALLABLE_OPERATOR_REGISTRY = {}
 
+
 def _register_callable_operator(H):
     handle = id(H)
     _CALLABLE_OPERATOR_REGISTRY[handle] = H
     return handle
+
+
+def _evaluate_operator_coefficient(coeff_handle, t):
+    return complex(_CALLABLE_OPERATOR_REGISTRY[coeff_handle](t))
+
+
+def _evaluate_operator_coefficient_numba(coeff_spec, t):
+    raise NotImplementedError
+
+
+@overload(_evaluate_operator_coefficient_numba)
+def _overload_evaluate_operator_coefficient_numba(coeff_spec, t):
+    if isinstance(coeff_spec, types.Integer):
+        def impl(coeff_spec, t):
+            with objmode(coeff='complex128'):
+                coeff = _evaluate_operator_coefficient(coeff_spec, t)
+            return coeff
+
+        return impl
+
+    if isinstance(coeff_spec, types.Dispatcher):
+        def impl(coeff_spec, t):
+            return complex(coeff_spec(t))
+
+        return impl
+
+    raise TypeError("Coefficient spec must be a callable handle or a Numba-jitted function")
 
 
 @njit(cache=True)
@@ -44,34 +73,51 @@ def _axpy_numba(scale, x, y):
         y[idx] += scale * x[idx]
 
 
-def _apply_H_operator_numba(H, t, x, y):
+@njit(cache=True)
+def _scal_numba(scale, x):
+    for idx in range(x.shape[0]):
+        x[idx] *= scale
+
+
+def _apply_H_operator_numba(H, t, x, y, alpha, beta):
     raise NotImplementedError
 
 
 @overload(_apply_H_operator_numba)
-def _overload_apply_H_operator_numba(H, t, x, y):
+def _overload_apply_H_operator_numba(H, t, x, y, alpha, beta):
     if isinstance(H, types.BaseTuple) and len(H) == 3:
-        def impl(H, t, x, y):
+        def impl(H, t, x, y, alpha, beta):
             data, indices, indptr = H
             for row in range(indptr.shape[0] - 1):
                 acc = 0.0 + 0.0j
                 for pos in range(indptr[row], indptr[row + 1]):
                     acc += data[pos] * x[indices[pos]]
-                y[row] = acc
+                y[row] = alpha * acc + beta * y[row]
 
     elif isinstance(H, types.Array):
-        def impl(H, t, x, y):
+        def impl(H, t, x, y, alpha, beta):
             charN = np.uint8(ord("N"))
-            zgemm(charN, charN, H.shape[0], 1, H.shape[1], 1.0 + 0.0j, H,
-                  H.shape[0], x, x.shape[0], 0.0 + 0.0j, y, y.shape[0])
+            zgemm(charN, charN, H.shape[0], 1, H.shape[1], alpha, H,
+                  H.shape[0], x, x.shape[0], beta, y, y.shape[0])
+
+    elif isinstance(H, types.BaseTuple) and len(H) == 2:
+        def impl(H, t, x, y, alpha, beta):
+            H0, H_terms = H
+            _apply_H_operator_numba(H0, t, x, y, alpha, beta)
+            for term in literal_unroll(H_terms):
+                Hk, coeff_spec = term
+                coeff = _evaluate_operator_coefficient_numba(coeff_spec, t)
+                _apply_H_operator_numba(Hk, t, x, y, alpha * coeff, 1.0 + 0.0j)
 
     elif isinstance(H, types.Integer):
-        def impl(H, t, x, y):
+        def impl(H, t, x, y, alpha, beta):
+            if alpha != 1.0 or beta != 0.0:
+                raise ValueError("Scaling not supported for callable operators in Numba Lanczos backend")
             with objmode():
                 _CALLABLE_OPERATOR_REGISTRY[H](t, x, y)
 
     else:
-        raise TypeError("Numba Lanczos operator must be dense array, CSR tuple, or callable handle")
+        raise TypeError("Numba Lanczos operator must be dense array, CSR tuple, specialized sum tuple, or callable handle")
 
     return impl
 
@@ -115,7 +161,7 @@ def _step_numba(operator, t, HT, config, scratch):
 
     for step in range(1, max_lanczos_steps + 1):
         step_count = step
-        _apply_H_operator_numba(operator, t, phia[step - 1], phia[step])
+        _apply_H_operator_numba(operator, t, phia[step - 1], phia[step], 1.0 + 0.0j, 0.0 + 0.0j)
         prefacs[step] = prefacs[step - 1]
         phinorm = prefacs[step] * _vnorm_numba(phia[step])
 
@@ -138,12 +184,12 @@ def _step_numba(operator, t, HT, config, scratch):
         beta[step - 1] = prefacs[step] * phinorm
         if phinorm <= breakdown_tol:
             prefacs[step] = 1.0
-            phia[step] = 0.
+            phia[step][:] = 0.0 + 0.0j
             exact_complete = True
         else:
             prefacs[step] = 1.0 / phinorm
             if abs(np.log10(prefacs[step])) > 4.0:
-                phia[step] *= prefacs[step]
+                _scal_numba(prefacs[step], phia[step])
                 prefacs[step] = 1.0
 
         prev_coeff[:] = curr_coeff
@@ -205,6 +251,27 @@ def _normalize_static_operator(H):
     return (H_dense.shape[0], H_dense)
 
 
+def _normalize_sum_operator(H):
+    dim, H0 = _normalize_static_operator(H[0])
+    H_terms = []
+    handles = []
+    for term in H[1:]:
+        if not isinstance(term, (tuple, list)) or len(term) != 2:
+            raise TypeError("Time-dependent Numba operator terms must be (H_k, f_k) pairs")
+        Hk, fk = term
+        Hk_dim, Hk_norm = _normalize_static_operator(Hk)
+        if Hk_dim != dim:
+            raise ValueError("All H_k operators must match the dimension of H_0")
+        if isinstance(fk, Dispatcher):
+            coeff_spec = fk
+        else:
+            coeff_spec = _register_callable_operator(fk)
+            handles.append(coeff_spec)
+        H_terms.append((Hk_norm, coeff_spec))
+
+    return dim, (H0, tuple(H_terms)), tuple(handles)
+
+
 def _allocate_scratch(maxsteps, dim):
     return (
         np.empty(maxsteps + 1, dtype=np.float64),  # alpha diagonal terms
@@ -231,9 +298,15 @@ class _lanczos_timeprop_numba:
         self.breakdown_tol = 1e-14
         self.config = (maxsteps, target_convg, do_full_order, self.breakdown_tol)
         self.H = H
+        self._registry_handles = []
 
-        if callable(H):
+        if _is_numba_sum_operator_input(H):
+            self.dim, self.operator, handles = _normalize_sum_operator(H)
+            self._registry_handles.extend(handles)
+            self.scratch = _allocate_scratch(maxsteps, self.dim)
+        elif callable(H):
             self.operator = _register_callable_operator(H)
+            self._registry_handles.append(self.operator)
             self.dim = None
             self.scratch = None
         else:
@@ -241,8 +314,9 @@ class _lanczos_timeprop_numba:
             self.scratch = _allocate_scratch(maxsteps, self.dim)
 
     def __del__(self):
-        if callable(self.H) and self.operator in _CALLABLE_OPERATOR_REGISTRY:
-            del _CALLABLE_OPERATOR_REGISTRY[self.operator]
+        for handle in self._registry_handles:
+            if handle in _CALLABLE_OPERATOR_REGISTRY:
+                del _CALLABLE_OPERATOR_REGISTRY[handle]
 
     def propagate(self, phi0, ts, maxHT=None):
         phi0 = np.asarray(phi0, dtype=np.complex128)
@@ -269,3 +343,12 @@ class _lanczos_timeprop_numba:
         _propagate_numba(self.operator, ts, use_maxht, maxht_value, self.config, self.scratch, out)
 
         return out
+
+
+def _is_numba_sum_operator_input(H):
+    if not isinstance(H, (tuple, list)) or len(H) < 2:
+        return False
+    for term in H[1:]:
+        if not isinstance(term, (tuple, list)) or len(term) != 2 or not callable(term[1]):
+            return False
+    return True

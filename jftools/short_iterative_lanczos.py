@@ -280,6 +280,15 @@ def _is_csr_matrix(H):
     return csr_array is not None and isinstance(H, csr_array)
 
 
+def _is_numba_sum_operator(H):
+    if not isinstance(H, (tuple, list)) or len(H) < 2:
+        return False
+    for term in H[1:]:
+        if not isinstance(term, (tuple, list)) or len(term) != 2 or not callable(term[1]):
+            return False
+    return True
+
+
 def _select_backend(H, backend):
     backend = backend.strip().lower()
 
@@ -299,7 +308,7 @@ def _select_backend(H, backend):
     if backend != "auto":
         raise ValueError("Unknown backend value '%s'. Valid values are 'python', 'numba', 'cython', 'auto'." % backend)
 
-    if have_numba_backend and (_is_dense_matrix(H) or _is_csr_matrix(H)):
+    if have_numba_backend and (_is_dense_matrix(H) or _is_csr_matrix(H) or _is_numba_sum_operator(H)):
         return "numba"
     if have_cython_backend:
         return "cython"
