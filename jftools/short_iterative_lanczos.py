@@ -29,6 +29,7 @@ try:
 except ImportError:
     have_qutip = False
 
+
 class normdotndarray(np.ndarray):
     """extension of numpy array that supports interface for lanczos_timeprop"""
 
@@ -71,10 +72,12 @@ def _as_hfun(H):
         return H
 
     H_f = H.dot if hasattr(H, "dot") else H.__matmul__
+
     def Hfun(t, phi, Hphi):
         Hphi[:] = H_f(phi)
 
     return Hfun
+
 
 def _qobj_state_io(phi0):
     outdims = phi0.dims

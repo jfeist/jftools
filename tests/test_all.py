@@ -122,24 +122,10 @@ def test_short_iterative_lanczos_dense_and_sparse_against_expm_multiply():
 
 
 def test_short_iterative_lanczos_3x3_hamiltonian_dense_sparse():
-    H_dense = np.array(
-        [
-            [0.3, -0.2, 0.0],
-            [-0.2, 0.1, -0.15],
-            [0.0, -0.15, -0.4],
-        ],
-        dtype=complex,
+    H_dense = np.array([[0.3, -0.2, 0.0], [-0.2, 0.1, -0.15], [0.0, -0.15, -0.4]], dtype=complex)
+    H_sparse = diags([np.array([-0.2, -0.15], dtype=float), np.array([0.3, 0.1, -0.4], dtype=float), np.array([-0.2, -0.15], dtype=float)], offsets=[-1, 0, 1], shape=(3, 3), format="csr").astype(
+        complex
     )
-    H_sparse = diags(
-        [
-            np.array([-0.2, -0.15], dtype=float),
-            np.array([0.3, 0.1, -0.4], dtype=float),
-            np.array([-0.2, -0.15], dtype=float),
-        ],
-        offsets=[-1, 0, 1],
-        shape=(3, 3),
-        format="csr",
-    ).astype(complex)
     phi0 = np.array([1.0 + 0.0j, 0.2 - 0.1j, -0.3 + 0.4j], dtype=complex)
     phi0 = phi0 / np.linalg.norm(phi0)
     ts = np.array([0.0, 0.1, 0.25, 0.5], dtype=float)
@@ -155,16 +141,9 @@ def test_short_iterative_lanczos_3x3_hamiltonian_dense_sparse():
 
 @pytest.mark.skipif(qutip is None, reason="qutip not installed")
 def test_short_iterative_lanczos_3x3_hamiltonian_qutip_inputs():
-    H_sparse = diags(
-        [
-            np.array([-0.2, -0.15], dtype=float),
-            np.array([0.3, 0.1, -0.4], dtype=float),
-            np.array([-0.2, -0.15], dtype=float),
-        ],
-        offsets=[-1, 0, 1],
-        shape=(3, 3),
-        format="csr",
-    ).astype(complex)
+    H_sparse = diags([np.array([-0.2, -0.15], dtype=float), np.array([0.3, 0.1, -0.4], dtype=float), np.array([-0.2, -0.15], dtype=float)], offsets=[-1, 0, 1], shape=(3, 3), format="csr").astype(
+        complex
+    )
     H_q = qutip.Qobj(H_sparse)
     phi0_np = np.array([1.0 + 0.0j, 0.2 - 0.1j, -0.3 + 0.4j], dtype=complex)
     phi0_np = phi0_np / np.linalg.norm(phi0_np)
@@ -214,15 +193,7 @@ def test_short_iterative_lanczos_small_dense_diagonal_exact(backend, n):
     phi0 = _normalized_random_state(n, seed=20 + n)
     ts = np.linspace(0.0, 0.6, 5)
 
-    out = jftools.short_iterative_lanczos.sesolve_lanczos(
-        H,
-        phi0,
-        ts,
-        maxsteps=8,
-        target_convg=1e-13,
-        maxHT=0.05,
-        backend=backend,
-    )
+    out = jftools.short_iterative_lanczos.sesolve_lanczos(H, phi0, ts, maxsteps=8, target_convg=1e-13, maxHT=0.05, backend=backend)
 
     for t, phi in zip(ts, out):
         phi_ref = np.exp(-1j * diag_vals * t) * phi0
@@ -251,15 +222,7 @@ def test_short_iterative_lanczos_small_callable_diagonal_exact(backend):
         Hphi[:] += np.cos(omega * t) * HI.dot(phi)
         return Hphi
 
-    out = jftools.short_iterative_lanczos.sesolve_lanczos(
-        Hfun,
-        phi0,
-        ts,
-        maxsteps=8,
-        target_convg=1e-13,
-        maxHT=2e-4,
-        backend=backend,
-    )
+    out = jftools.short_iterative_lanczos.sesolve_lanczos(Hfun, phi0, ts, maxsteps=8, target_convg=1e-13, maxHT=2e-4, backend=backend)
 
     for t, phi in zip(ts, out):
         theta = h0_diag * t + (hi_diag / omega) * np.sin(omega * t)
@@ -331,15 +294,7 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_dense_exact_jit_coeff():
     def f2(t):
         return np.sin(omega2 * t)
 
-    out = jftools.short_iterative_lanczos.sesolve_lanczos(
-        (H0, (H1, f1), (H2, f2)),
-        phi0,
-        ts,
-        maxsteps=8,
-        target_convg=1e-13,
-        maxHT=2e-4,
-        backend="numba",
-    )
+    out = jftools.short_iterative_lanczos.sesolve_lanczos((H0, (H1, f1), (H2, f2)), phi0, ts, maxsteps=8, target_convg=1e-13, maxHT=2e-4, backend="numba")
 
     for t, phi in zip(ts, out):
         theta = h0_diag * t
@@ -374,12 +329,7 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_mixed_compiled_coeffs_exact(
     def f2(t):
         return np.sin(omega2 * t)
 
-    prop = jftools.short_iterative_lanczos.lanczos_timeprop(
-        (H0, (H1, f1), (H2, f2)),
-        maxsteps=8,
-        target_convg=1e-13,
-        backend="numba",
-    )
+    prop = jftools.short_iterative_lanczos.lanczos_timeprop((H0, (H1, f1), (H2, f2)), maxsteps=8, target_convg=1e-13, backend="numba")
     out = prop.propagate(phi0, ts, maxHT=2e-4)
 
     for t, phi in zip(ts, out):
@@ -416,24 +366,8 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_csr_matches_callable():
         return Hphi
 
     H_numba = (H0, (H1, f1), (H2, f2))
-    out_numba = jftools.short_iterative_lanczos.sesolve_lanczos(
-        H_numba,
-        phi0,
-        ts,
-        maxsteps=14,
-        target_convg=1e-12,
-        maxHT=0.05,
-        backend="numba",
-    )
-    out_python = jftools.short_iterative_lanczos.sesolve_lanczos(
-        Hfun,
-        phi0,
-        ts,
-        maxsteps=14,
-        target_convg=1e-12,
-        maxHT=0.05,
-        backend="python",
-    )
+    out_numba = jftools.short_iterative_lanczos.sesolve_lanczos(H_numba, phi0, ts, maxsteps=14, target_convg=1e-12, maxHT=0.05, backend="numba")
+    out_python = jftools.short_iterative_lanczos.sesolve_lanczos(Hfun, phi0, ts, maxsteps=14, target_convg=1e-12, maxHT=0.05, backend="python")
 
     for phi_numba, phi_python in zip(out_numba, out_python):
         assert np.allclose(phi_numba, phi_python, rtol=5e-9, atol=5e-10)
@@ -451,12 +385,7 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_rejects_wrong_cfunc_signatur
         return np.cos(t)
 
     with pytest.raises(TypeError, match=r"complex128\(float64\)"):
-        jftools.short_iterative_lanczos.lanczos_timeprop(
-            (H0, (H1, bad_coeff)),
-            maxsteps=6,
-            target_convg=1e-12,
-            backend="numba",
-        )
+        jftools.short_iterative_lanczos.lanczos_timeprop((H0, (H1, bad_coeff)), maxsteps=6, target_convg=1e-12, backend="numba")
 
 
 @pytest.mark.parametrize("backend", ["python", "numba", "cython"])
@@ -467,27 +396,11 @@ def test_short_iterative_lanczos_full_basis_completion_stops_cleanly(backend):
         pytest.skip("cython backend not available")
 
     n = 3
-    H = np.array(
-        [
-            [0.3, -0.2, 0.05],
-            [-0.2, 0.1, -0.15],
-            [0.05, -0.15, -0.4],
-        ],
-        dtype=complex,
-    )
+    H = np.array([[0.3, -0.2, 0.05], [-0.2, 0.1, -0.15], [0.05, -0.15, -0.4]], dtype=complex)
     phi0 = _normalized_random_state(n, seed=42)
     ts = np.array([0.0, 0.2, 0.4], dtype=float)
 
-    out = jftools.short_iterative_lanczos.sesolve_lanczos(
-        H,
-        phi0,
-        ts,
-        maxsteps=10,
-        target_convg=1e-30,
-        maxHT=0.4,
-        do_full_order=True,
-        backend=backend,
-    )
+    out = jftools.short_iterative_lanczos.sesolve_lanczos(H, phi0, ts, maxsteps=10, target_convg=1e-30, maxHT=0.4, do_full_order=True, backend=backend)
 
     for t, phi in zip(ts, out):
         phi_ref = expm_multiply(-1j * t * H, phi0)
@@ -572,15 +485,7 @@ def test_short_iterative_lanczos_explicit_cython_callable_needs_no_dim():
     assert prop.backend == "cython"
 
     out_cython = prop.propagate(phi0, ts, maxHT=0.05)
-    out_python = jftools.short_iterative_lanczos.sesolve_lanczos(
-        Hfun,
-        phi0,
-        ts,
-        maxsteps=14,
-        target_convg=1e-12,
-        maxHT=0.05,
-        backend="python",
-    )
+    out_python = jftools.short_iterative_lanczos.sesolve_lanczos(Hfun, phi0, ts, maxsteps=14, target_convg=1e-12, maxHT=0.05, backend="python")
 
     for phi_cython, phi_python in zip(out_cython, out_python):
         assert np.allclose(phi_cython, phi_python, rtol=5e-10, atol=5e-12)
@@ -617,29 +522,16 @@ def test_short_iterative_lanczos_auto_prefers_cython_for_linear_operator():
     phi0 = _normalized_random_state(n, seed=13)
     ts = np.linspace(0.0, 0.25, 4)
 
-    H_linop = LinearOperator(
-        shape=(n, n),
-        matvec=lambda x: H_dense.dot(x),
-        dtype=np.complex128,
-    )
+    H_linop = LinearOperator(shape=(n, n), matvec=lambda x: H_dense.dot(x), dtype=np.complex128)
+
     def Hfun(t, phi, Hphi):
         Hphi[:] = H_linop(phi)
 
-    prop_auto = jftools.short_iterative_lanczos.lanczos_timeprop(
-        Hfun, maxsteps=12, target_convg=1e-12, backend="auto"
-    )
+    prop_auto = jftools.short_iterative_lanczos.lanczos_timeprop(Hfun, maxsteps=12, target_convg=1e-12, backend="auto")
     assert prop_auto.backend == "cython"
 
     out_auto = prop_auto.propagate(phi0, ts, maxHT=0.05)
-    out_python = jftools.short_iterative_lanczos.sesolve_lanczos(
-        Hfun,
-        phi0,
-        ts,
-        maxsteps=12,
-        target_convg=1e-12,
-        maxHT=0.05,
-        backend="python",
-    )
+    out_python = jftools.short_iterative_lanczos.sesolve_lanczos(Hfun, phi0, ts, maxsteps=12, target_convg=1e-12, maxHT=0.05, backend="python")
 
     for phi_auto, phi_py in zip(out_auto, out_python):
         assert np.allclose(phi_auto, phi_py, rtol=5e-9, atol=5e-11)

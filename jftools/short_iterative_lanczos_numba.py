@@ -35,12 +35,14 @@ def _evaluate_operator_coefficient(coeff_spec, t):
 @overload(_evaluate_operator_coefficient)
 def _overload_evaluate_operator_coefficient(coeff_spec, t):
     if isinstance(coeff_spec, types.FunctionType):
+
         def impl(coeff_spec, t):
             return coeff_spec(t)
 
         return impl
 
     if isinstance(coeff_spec, types.Dispatcher):
+
         def impl(coeff_spec, t):
             return complex(coeff_spec(t))
 
@@ -93,6 +95,7 @@ def _apply_H_operator(H, t, x, y, alpha, beta):
 @overload(_apply_H_operator)
 def _overload_apply_H_operator(H, t, x, y, alpha, beta):
     if isinstance(H, types.BaseTuple) and len(H) == 3:
+
         def impl(H, t, x, y, alpha, beta):
             data, indices, indptr = H
             for row in range(indptr.shape[0] - 1):
@@ -102,12 +105,13 @@ def _overload_apply_H_operator(H, t, x, y, alpha, beta):
                 y[row] = alpha * acc + beta * y[row]
 
     elif isinstance(H, types.Array):
+
         def impl(H, t, x, y, alpha, beta):
             charN = np.uint8(ord("N"))
-            zgemm(charN, charN, H.shape[0], 1, H.shape[1], alpha, H,
-                  H.shape[0], x, x.shape[0], beta, y, y.shape[0])
+            zgemm(charN, charN, H.shape[0], 1, H.shape[1], alpha, H, H.shape[0], x, x.shape[0], beta, y, y.shape[0])
 
     elif isinstance(H, types.Integer):
+
         def impl(H, t, x, y, alpha, beta):
             if alpha != 1.0 + 0.0j or beta != 0.0 + 0.0j:
                 raise ValueError("Scaling not supported for callable operators in Numba Lanczos backend")
@@ -128,11 +132,10 @@ def _calc_coeff(step, HT, coeff, scratch):
         return
 
     diag_work[:step] = alpha[:step]
-    offdiag_work[:step - 1] = beta[:step - 1]
+    offdiag_work[: step - 1] = beta[: step - 1]
 
     lapack_info[0] = 0
-    dstevd(np.uint8(ord("V")), step, diag_work, offdiag_work, eigvecs, eigvecs.shape[0],
-           lapack_work, lapack_work.shape[0], lapack_iwork, lapack_iwork.shape[0], lapack_info)
+    dstevd(np.uint8(ord("V")), step, diag_work, offdiag_work, eigvecs, eigvecs.shape[0], lapack_work, lapack_work.shape[0], lapack_iwork, lapack_iwork.shape[0], lapack_info)
     if lapack_info[0] != 0:
         raise ValueError("dstevd failed in Numba Lanczos backend")
 
@@ -145,10 +148,7 @@ def _calc_coeff(step, HT, coeff, scratch):
 def _normalize_static_operator(H):
     if sp.isspmatrix_csr(H) or (hasattr(sp, "csr_array") and isinstance(H, sp.csr_array)):
         H_csr = sp.csr_matrix(H).astype(np.complex128)
-        return (
-            H_csr.shape[0],
-            (H_csr.data, H_csr.indices.astype(np.int64), H_csr.indptr.astype(np.int64))
-        )
+        return (H_csr.shape[0], (H_csr.data, H_csr.indices.astype(np.int64), H_csr.indptr.astype(np.int64)))
 
     H_dense = np.asfortranarray(H, dtype=np.complex128)
     if H_dense.ndim != 2 or H_dense.shape[0] != H_dense.shape[1]:
@@ -185,15 +185,8 @@ def _normalize_sum_operator(H):
 
 
 def _build_sum_operator(coeff_specs):
-    namespace = {
-        "_apply_H_operator": _apply_H_operator,
-        "objmode": objmode,
-    }
-    src_lines = [
-        "def _apply_sum_operator(operator, t, x, y, alpha, beta):",
-        "    H0, H_terms = operator",
-        "    _apply_H_operator(H0, t, x, y, alpha, beta)",
-    ]
+    namespace = {"_apply_H_operator": _apply_H_operator, "objmode": objmode}
+    src_lines = ["def _apply_sum_operator(operator, t, x, y, alpha, beta):", "    H0, H_terms = operator", "    _apply_H_operator(H0, t, x, y, alpha, beta)"]
     for idx, coeff_spec in enumerate(coeff_specs):
         namespace[f"_coeff{idx}"] = coeff_spec
         if _is_compiled_coefficient_function(coeff_spec):
