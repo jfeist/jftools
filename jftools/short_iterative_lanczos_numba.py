@@ -7,6 +7,7 @@ from numba.extending import overload
 from numba_lapack import dstevd, zgemm
 from scipy import sparse as sp
 
+_SUM_PROPAGATORS = {}
 _CALLABLE_OBJECTS = {}
 
 
@@ -304,6 +305,24 @@ def _build_propagator(apply_operator):
 _propagate = _build_propagator(_apply_H_operator)
 
 
+def _get_sum_propagator(coeff_specs):
+    key = []
+    for coeff_spec in coeff_specs:
+        if isinstance(coeff_spec, CFunc):
+            key.append(("cfunc", coeff_spec.address))
+        elif isinstance(coeff_spec, Dispatcher):
+            key.append(("dispatcher", id(coeff_spec)))
+        else:
+            key.append(("python", id(coeff_spec)))
+    key = tuple(key)
+
+    propagator = _SUM_PROPAGATORS.get(key)
+    if propagator is None:
+        propagator = _build_propagator(_build_sum_operator(coeff_specs))
+        _SUM_PROPAGATORS[key] = propagator
+    return propagator
+
+
 def _allocate_scratch(maxsteps, dim):
     return (
         np.empty(maxsteps + 1, dtype=np.float64),  # alpha diagonal terms
@@ -334,7 +353,7 @@ class _lanczos_timeprop_numba:
 
         if _is_sum_operator_input(H):
             self.dim, self.operator, coeff_specs = _normalize_sum_operator(H)
-            self._propagate_impl = _build_propagator(_build_sum_operator(coeff_specs))
+            self._propagate_impl = _get_sum_propagator(coeff_specs)
             self.scratch = _allocate_scratch(maxsteps, self.dim)
         elif callable(H):
             self.operator = _register_callable_object(H)
