@@ -2,7 +2,8 @@ import time
 
 import numpy as np
 import pytest
-from numba import njit
+from numba import cfunc, jit, njit
+from numba.core import types
 from scipy.sparse import diags
 from scipy.sparse.linalg import LinearOperator, expm_multiply
 
@@ -283,6 +284,45 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_dense_exact():
     H1 = np.diag(h1_diag).astype(complex)
     H2 = np.diag(h2_diag).astype(complex)
 
+    @cfunc(types.complex128(types.float64))
+    def f1(t):
+        return np.cos(omega1 * t)
+
+    @cfunc(types.complex128(types.float64))
+    def f2(t):
+        return np.sin(omega2 * t)
+
+    H_numba = (H0, (H1, f1), (H2, f2))
+    prop = jftools.short_iterative_lanczos.lanczos_timeprop(H_numba, maxsteps=8, target_convg=1e-13, backend="auto")
+    assert prop.backend == "numba"
+
+    out = prop.propagate(phi0, ts, maxHT=2e-4)
+
+    for t, phi in zip(ts, out):
+        theta = h0_diag * t
+        theta += (h1_diag / omega1) * np.sin(omega1 * t)
+        theta += (h2_diag / omega2) * (1.0 - np.cos(omega2 * t))
+        phi_ref = np.exp(-1j * theta) * phi0
+        assert np.allclose(phi, phi_ref, rtol=2e-4, atol=1e-6)
+
+
+def test_short_iterative_lanczos_numba_h0_sum_fk_hk_dense_exact_jit_coeff():
+    if not jftools.short_iterative_lanczos.have_numba_backend:
+        pytest.skip("numba backend not available")
+
+    n = 3
+    h0_diag = np.array([0.8, -0.6, 0.2], dtype=float)
+    h1_diag = np.array([0.4, 0.1, -0.3], dtype=float)
+    h2_diag = np.array([-0.15, 0.25, 0.05], dtype=float)
+    omega1 = 2.3
+    omega2 = 1.7
+    phi0 = _normalized_random_state(n, seed=63)
+    ts = np.linspace(0.0, 0.6, 5)
+
+    H0 = np.diag(h0_diag).astype(complex)
+    H1 = np.diag(h1_diag).astype(complex)
+    H2 = np.diag(h2_diag).astype(complex)
+
     @njit(cache=True)
     def f1(t):
         return np.cos(omega1 * t)
@@ -291,10 +331,55 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_dense_exact():
     def f2(t):
         return np.sin(omega2 * t)
 
-    H_numba = (H0, (H1, f1), (H2, f2))
-    prop = jftools.short_iterative_lanczos.lanczos_timeprop(H_numba, maxsteps=8, target_convg=1e-13, backend="auto")
-    assert prop.backend == "numba"
+    out = jftools.short_iterative_lanczos.sesolve_lanczos(
+        (H0, (H1, f1), (H2, f2)),
+        phi0,
+        ts,
+        maxsteps=8,
+        target_convg=1e-13,
+        maxHT=2e-4,
+        backend="numba",
+    )
 
+    for t, phi in zip(ts, out):
+        theta = h0_diag * t
+        theta += (h1_diag / omega1) * np.sin(omega1 * t)
+        theta += (h2_diag / omega2) * (1.0 - np.cos(omega2 * t))
+        phi_ref = np.exp(-1j * theta) * phi0
+        assert np.allclose(phi, phi_ref, rtol=2e-4, atol=1e-6)
+
+
+def test_short_iterative_lanczos_numba_h0_sum_fk_hk_mixed_compiled_coeffs_exact():
+    if not jftools.short_iterative_lanczos.have_numba_backend:
+        pytest.skip("numba backend not available")
+
+    n = 3
+    h0_diag = np.array([0.7, -0.2, 0.5], dtype=float)
+    h1_diag = np.array([0.3, -0.1, 0.2], dtype=float)
+    h2_diag = np.array([-0.05, 0.15, 0.25], dtype=float)
+    omega1 = 1.9
+    omega2 = 1.4
+    phi0 = _normalized_random_state(n, seed=64)
+    ts = np.linspace(0.0, 0.5, 5)
+
+    H0 = np.diag(h0_diag).astype(complex)
+    H1 = np.diag(h1_diag).astype(complex)
+    H2 = np.diag(h2_diag).astype(complex)
+
+    @cfunc(types.complex128(types.float64))
+    def f1(t):
+        return np.cos(omega1 * t)
+
+    @jit(types.complex128(types.float64))
+    def f2(t):
+        return np.sin(omega2 * t)
+
+    prop = jftools.short_iterative_lanczos.lanczos_timeprop(
+        (H0, (H1, f1), (H2, f2)),
+        maxsteps=8,
+        target_convg=1e-13,
+        backend="numba",
+    )
     out = prop.propagate(phi0, ts, maxHT=2e-4)
 
     for t, phi in zip(ts, out):
@@ -316,11 +401,11 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_csr_matches_callable():
     phi0 = _normalized_random_state(n, seed=54)
     ts = np.linspace(0.0, 0.4, 5)
 
-    @njit(cache=True)
+    @cfunc(types.complex128(types.float64))
     def f1(t):
         return np.cos(1.9 * t)
 
-    @njit(cache=True)
+    @cfunc(types.complex128(types.float64))
     def f2(t):
         return 0.4 * np.sin(0.8 * t)
 
@@ -352,6 +437,26 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_csr_matches_callable():
 
     for phi_numba, phi_python in zip(out_numba, out_python):
         assert np.allclose(phi_numba, phi_python, rtol=5e-9, atol=5e-10)
+
+
+def test_short_iterative_lanczos_numba_h0_sum_fk_hk_rejects_wrong_cfunc_signature():
+    if not jftools.short_iterative_lanczos.have_numba_backend:
+        pytest.skip("numba backend not available")
+
+    H0 = np.diag(np.array([0.2, -0.4], dtype=float)).astype(complex)
+    H1 = np.diag(np.array([0.1, 0.3], dtype=float)).astype(complex)
+
+    @cfunc(types.float64(types.float64))
+    def bad_coeff(t):
+        return np.cos(t)
+
+    with pytest.raises(TypeError, match=r"complex128\(float64\)"):
+        jftools.short_iterative_lanczos.lanczos_timeprop(
+            (H0, (H1, bad_coeff)),
+            maxsteps=6,
+            target_convg=1e-12,
+            backend="numba",
+        )
 
 
 @pytest.mark.parametrize("backend", ["python", "numba", "cython"])

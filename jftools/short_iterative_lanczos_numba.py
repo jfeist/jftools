@@ -1,35 +1,41 @@
 import numpy as np
 from numba import literal_unroll, njit, objmode
+from numba.core.ccallback import CFunc
 from numba.core import types
 from numba.core.dispatcher import Dispatcher
 from numba.extending import overload
 from numba_lapack import dstevd, zgemm
 from scipy import sparse as sp
 
-_CALLABLE_OPERATOR_REGISTRY = {}
+_CALLABLE_OBJECTS = {}
 
 
-def _register_callable_operator(H):
-    handle = id(H)
-    _CALLABLE_OPERATOR_REGISTRY[handle] = H
+def _register_callable_object(callable_object):
+    handle = id(callable_object)
+    entry = _CALLABLE_OBJECTS.get(handle, (callable_object, 0))
+    _CALLABLE_OBJECTS[handle] = (entry[0], entry[1] + 1)
     return handle
 
 
-def _evaluate_operator_coefficient(coeff_handle, t):
-    return complex(_CALLABLE_OPERATOR_REGISTRY[coeff_handle](t))
+def _release_callable_object(handle):
+    callable_object, refcount = _CALLABLE_OBJECTS.get(handle, (None, 0))
+    if callable_object is None:
+        return
+    if refcount <= 1:
+        del _CALLABLE_OBJECTS[handle]
+    else:
+        _CALLABLE_OBJECTS[handle] = (callable_object, refcount - 1)
 
 
-def _evaluate_operator_coefficient_numba(coeff_spec, t):
+def _evaluate_operator_coefficient(coeff_spec, t):
     raise NotImplementedError
 
 
-@overload(_evaluate_operator_coefficient_numba)
-def _overload_evaluate_operator_coefficient_numba(coeff_spec, t):
-    if isinstance(coeff_spec, types.Integer):
+@overload(_evaluate_operator_coefficient)
+def _overload_evaluate_operator_coefficient(coeff_spec, t):
+    if isinstance(coeff_spec, types.FunctionType):
         def impl(coeff_spec, t):
-            with objmode(coeff='complex128'):
-                coeff = _evaluate_operator_coefficient(coeff_spec, t)
-            return coeff
+            return coeff_spec(t)
 
         return impl
 
@@ -39,11 +45,11 @@ def _overload_evaluate_operator_coefficient_numba(coeff_spec, t):
 
         return impl
 
-    raise TypeError("Coefficient spec must be a callable handle or a Numba-jitted function")
+    raise TypeError("Coefficient spec must be a callable handle, cfunc, or a Numba-jitted function")
 
 
 @njit(cache=True)
-def _vdot_numba(a, b):
+def _vdot(a, b):
     out = 0.0 + 0.0j
     for idx in range(a.shape[0]):
         out += np.conjugate(a[idx]) * b[idx]
@@ -51,7 +57,7 @@ def _vdot_numba(a, b):
 
 
 @njit(cache=True)
-def _vnorm_numba(a):
+def _vnorm(a):
     out = 0.0
     for idx in range(a.shape[0]):
         out += a[idx].real * a[idx].real + a[idx].imag * a[idx].imag
@@ -59,7 +65,7 @@ def _vnorm_numba(a):
 
 
 @njit(cache=True)
-def _coeff_diff_norm_numba(a, b, n):
+def _coeff_diff_norm(a, b, n):
     out = 0.0
     for idx in range(n):
         delta = a[idx] - b[idx]
@@ -68,23 +74,23 @@ def _coeff_diff_norm_numba(a, b, n):
 
 
 @njit(cache=True)
-def _axpy_numba(scale, x, y):
+def _axpy(scale, x, y):
     for idx in range(x.shape[0]):
         y[idx] += scale * x[idx]
 
 
 @njit(cache=True)
-def _scal_numba(scale, x):
+def _scal(scale, x):
     for idx in range(x.shape[0]):
         x[idx] *= scale
 
 
-def _apply_H_operator_numba(H, t, x, y, alpha, beta):
+def _apply_H_operator(H, t, x, y, alpha, beta):
     raise NotImplementedError
 
 
-@overload(_apply_H_operator_numba)
-def _overload_apply_H_operator_numba(H, t, x, y, alpha, beta):
+@overload(_apply_H_operator)
+def _overload_apply_H_operator(H, t, x, y, alpha, beta):
     if isinstance(H, types.BaseTuple) and len(H) == 3:
         def impl(H, t, x, y, alpha, beta):
             data, indices, indptr = H
@@ -100,30 +106,21 @@ def _overload_apply_H_operator_numba(H, t, x, y, alpha, beta):
             zgemm(charN, charN, H.shape[0], 1, H.shape[1], alpha, H,
                   H.shape[0], x, x.shape[0], beta, y, y.shape[0])
 
-    elif isinstance(H, types.BaseTuple) and len(H) == 2:
-        def impl(H, t, x, y, alpha, beta):
-            H0, H_terms = H
-            _apply_H_operator_numba(H0, t, x, y, alpha, beta)
-            for term in literal_unroll(H_terms):
-                Hk, coeff_spec = term
-                coeff = _evaluate_operator_coefficient_numba(coeff_spec, t)
-                _apply_H_operator_numba(Hk, t, x, y, alpha * coeff, 1.0 + 0.0j)
-
     elif isinstance(H, types.Integer):
         def impl(H, t, x, y, alpha, beta):
-            if alpha != 1.0 or beta != 0.0:
+            if alpha != 1.0 + 0.0j or beta != 0.0 + 0.0j:
                 raise ValueError("Scaling not supported for callable operators in Numba Lanczos backend")
             with objmode():
-                _CALLABLE_OPERATOR_REGISTRY[H](t, x, y)
+                _CALLABLE_OBJECTS[H][0](t, x, y)
 
     else:
-        raise TypeError("Numba Lanczos operator must be dense array, CSR tuple, specialized sum tuple, or callable handle")
+        raise TypeError("Numba Lanczos operator must be dense array, CSR tuple, or callable handle")
 
     return impl
 
 
 @njit(cache=True)
-def _calc_coeff_numba(step, HT, coeff, scratch):
+def _calc_coeff(step, HT, coeff, scratch):
     alpha, beta, _, _, _, _, eigvecs, diag_work, offdiag_work, lapack_work, lapack_iwork, lapack_info = scratch
     coeff[:] = 0.0 + 0.0j
     if step <= 0:
@@ -144,98 +141,6 @@ def _calc_coeff_numba(step, HT, coeff, scratch):
             coeff[jdx] += eigvecs[jdx, idx] * factor
 
 
-@njit(cache=True)
-def _step_numba(operator, t, HT, config, scratch):
-    maxsteps, target_convg, do_full_order, breakdown_tol = config
-    alpha, beta, prefacs, curr_coeff, prev_coeff, phia, _, _, _, _, _, _ = scratch
-    max_lanczos_steps = min(maxsteps, phia.shape[1])
-    HT_done = HT
-
-    phinorm = _vnorm_numba(phia[0])
-    prefacs[0] = 1.0 / phinorm
-    curr_coeff[:] = 0.0 + 0.0j
-
-    convg = 1.0e300
-    exact_complete = False
-    step_count = 0
-
-    for step in range(1, max_lanczos_steps + 1):
-        step_count = step
-        _apply_H_operator_numba(operator, t, phia[step - 1], phia[step], 1.0 + 0.0j, 0.0 + 0.0j)
-        prefacs[step] = prefacs[step - 1]
-        phinorm = prefacs[step] * _vnorm_numba(phia[step])
-
-        dotpr = prefacs[step - 1] * prefacs[step] * _vdot_numba(phia[step - 1], phia[step])
-        alpha[step - 1] = dotpr.real
-
-        scale = -alpha[step - 1] * prefacs[step - 1] / prefacs[step]
-        _axpy_numba(scale, phia[step - 1], phia[step])
-
-        if abs(phinorm * phinorm - alpha[step - 1] * alpha[step - 1]) < 0.1:
-            dotpr = prefacs[step - 1] * prefacs[step] * _vdot_numba(phia[step - 1], phia[step])
-            scale = -dotpr * prefacs[step - 1] / prefacs[step]
-            _axpy_numba(scale, phia[step - 1], phia[step])
-
-        if step >= 2:
-            scale = -beta[step - 2] * prefacs[step - 2] / prefacs[step]
-            _axpy_numba(scale, phia[step - 2], phia[step])
-
-        phinorm = _vnorm_numba(phia[step])
-        beta[step - 1] = prefacs[step] * phinorm
-        if phinorm <= breakdown_tol:
-            prefacs[step] = 1.0
-            phia[step][:] = 0.0 + 0.0j
-            exact_complete = True
-        else:
-            prefacs[step] = 1.0 / phinorm
-            if abs(np.log10(prefacs[step])) > 4.0:
-                _scal_numba(prefacs[step], phia[step])
-                prefacs[step] = 1.0
-
-        prev_coeff[:] = curr_coeff
-        _calc_coeff_numba(step, HT_done, curr_coeff, scratch)
-        convg = _coeff_diff_norm_numba(curr_coeff, prev_coeff, step)
-
-        if exact_complete or step == max_lanczos_steps:
-            break
-        if (not do_full_order) and convg < target_convg:
-            break
-
-    while (not exact_complete) and convg > target_convg:
-        scale = 0.95 * (target_convg / convg) ** (1.0 / step_count)
-        if scale < 0.5:
-            scale = 0.5
-        HT_done *= scale
-        _calc_coeff_numba(step_count - 1, HT_done, prev_coeff, scratch)
-        _calc_coeff_numba(step_count, HT_done, curr_coeff, scratch)
-        convg = _coeff_diff_norm_numba(curr_coeff, prev_coeff, step_count)
-
-    phia[0] *= curr_coeff[0]
-    for idx in range(1, step_count):
-        scale = curr_coeff[idx] * prefacs[idx] / prefacs[0]
-        _axpy_numba(scale, phia[idx], phia[0])
-
-    return HT_done
-
-
-@njit(cache=True)
-def _propagate_numba(operator, ts, use_maxht, maxht_value, config, scratch, out):
-    _, _, _, _, _, phia, _, _, _, _, _, _ = scratch
-    tt = ts[0]
-    out[0, :] = phia[0, :]
-    for out_idx in range(1, ts.shape[0]):
-        tf = ts[out_idx]
-        while tt < tf:
-            HT = tf - tt
-            if use_maxht and HT > maxht_value:
-                HT = maxht_value
-            HT_done = _step_numba(operator, tt, HT, config, scratch)
-            if not np.isfinite(HT_done) or HT_done <= 0.0:
-                raise ValueError("Numba Lanczos backend produced a non-positive propagation step")
-            tt += HT_done
-        out[out_idx, :] = phia[0, :]
-
-
 def _normalize_static_operator(H):
     if sp.isspmatrix_csr(H) or (hasattr(sp, "csr_array") and isinstance(H, sp.csr_array)):
         H_csr = sp.csr_matrix(H).astype(np.complex128)
@@ -251,10 +156,14 @@ def _normalize_static_operator(H):
     return (H_dense.shape[0], H_dense)
 
 
+def _is_compiled_coefficient_function(coeff_spec):
+    return isinstance(coeff_spec, (CFunc, Dispatcher))
+
+
 def _normalize_sum_operator(H):
     dim, H0 = _normalize_static_operator(H[0])
-    H_terms = []
-    handles = []
+    H_ops = []
+    coeff_specs = []
     for term in H[1:]:
         if not isinstance(term, (tuple, list)) or len(term) != 2:
             raise TypeError("Time-dependent Numba operator terms must be (H_k, f_k) pairs")
@@ -262,14 +171,137 @@ def _normalize_sum_operator(H):
         Hk_dim, Hk_norm = _normalize_static_operator(Hk)
         if Hk_dim != dim:
             raise ValueError("All H_k operators must match the dimension of H_0")
-        if isinstance(fk, Dispatcher):
+        if _is_compiled_coefficient_function(fk):
+            if isinstance(fk, CFunc) and (fk._sig.args != (types.float64,) or fk._sig.return_type != types.complex128):
+                raise TypeError("Numba cfunc coefficient functions must have signature complex128(float64)")
             coeff_spec = fk
         else:
-            coeff_spec = _register_callable_operator(fk)
-            handles.append(coeff_spec)
-        H_terms.append((Hk_norm, coeff_spec))
+            coeff_spec = fk
+        H_ops.append(Hk_norm)
+        coeff_specs.append(coeff_spec)
 
-    return dim, (H0, tuple(H_terms)), tuple(handles)
+    return dim, (H0, tuple(H_ops)), tuple(coeff_specs)
+
+
+def _build_sum_operator(coeff_specs):
+    namespace = {
+        "_apply_H_operator": _apply_H_operator,
+        "objmode": objmode,
+    }
+    src_lines = [
+        "def _apply_sum_operator(operator, t, x, y, alpha, beta):",
+        "    H0, H_terms = operator",
+        "    _apply_H_operator(H0, t, x, y, alpha, beta)",
+    ]
+    for idx, coeff_spec in enumerate(coeff_specs):
+        namespace[f"_coeff{idx}"] = coeff_spec
+        if _is_compiled_coefficient_function(coeff_spec):
+            src_lines.append(f"    coeff_{idx} = complex(_coeff{idx}(t))")
+        else:
+            src_lines.append(f"    with objmode(coeff_{idx}='complex128'):")
+            src_lines.append(f"        coeff_{idx} = complex(_coeff{idx}(t))")
+        src_lines.append(f"    _apply_H_operator(H_terms[{idx}], t, x, y, alpha * coeff_{idx}, 1.0 + 0.0j)")
+
+    exec("\n".join(src_lines), namespace)
+    return njit(namespace["_apply_sum_operator"])
+
+
+def _build_propagator(apply_operator):
+
+    @njit
+    def _step(operator, t, HT, config, scratch):
+        maxsteps, target_convg, do_full_order, breakdown_tol = config
+        alpha, beta, prefacs, curr_coeff, prev_coeff, phia, _, _, _, _, _, _ = scratch
+        max_lanczos_steps = min(maxsteps, phia.shape[1])
+        HT_done = HT
+
+        phinorm = _vnorm(phia[0])
+        prefacs[0] = 1.0 / phinorm
+        curr_coeff[:] = 0.0 + 0.0j
+
+        convg = 1.0e300
+        exact_complete = False
+        step_count = 0
+
+        for step in range(1, max_lanczos_steps + 1):
+            step_count = step
+            apply_operator(operator, t, phia[step - 1], phia[step], 1.0 + 0.0j, 0.0 + 0.0j)
+            prefacs[step] = prefacs[step - 1]
+            phinorm = prefacs[step] * _vnorm(phia[step])
+
+            dotpr = prefacs[step - 1] * prefacs[step] * _vdot(phia[step - 1], phia[step])
+            alpha[step - 1] = dotpr.real
+
+            scale = -alpha[step - 1] * prefacs[step - 1] / prefacs[step]
+            _axpy(scale, phia[step - 1], phia[step])
+
+            if abs(phinorm * phinorm - alpha[step - 1] * alpha[step - 1]) < 0.1:
+                dotpr = prefacs[step - 1] * prefacs[step] * _vdot(phia[step - 1], phia[step])
+                scale = -dotpr * prefacs[step - 1] / prefacs[step]
+                _axpy(scale, phia[step - 1], phia[step])
+
+            if step >= 2:
+                scale = -beta[step - 2] * prefacs[step - 2] / prefacs[step]
+                _axpy(scale, phia[step - 2], phia[step])
+
+            phinorm = _vnorm(phia[step])
+            beta[step - 1] = prefacs[step] * phinorm
+            if phinorm <= breakdown_tol:
+                prefacs[step] = 1.0
+                phia[step][:] = 0.0 + 0.0j
+                exact_complete = True
+            else:
+                prefacs[step] = 1.0 / phinorm
+                if abs(np.log10(prefacs[step])) > 4.0:
+                    _scal(prefacs[step], phia[step])
+                    prefacs[step] = 1.0
+
+            prev_coeff[:] = curr_coeff
+            _calc_coeff(step, HT_done, curr_coeff, scratch)
+            convg = _coeff_diff_norm(curr_coeff, prev_coeff, step)
+
+            if exact_complete or step == max_lanczos_steps:
+                break
+            if (not do_full_order) and convg < target_convg:
+                break
+
+        while (not exact_complete) and convg > target_convg:
+            scale = 0.95 * (target_convg / convg) ** (1.0 / step_count)
+            if scale < 0.5:
+                scale = 0.5
+            HT_done *= scale
+            _calc_coeff(step_count - 1, HT_done, prev_coeff, scratch)
+            _calc_coeff(step_count, HT_done, curr_coeff, scratch)
+            convg = _coeff_diff_norm(curr_coeff, prev_coeff, step_count)
+
+        phia[0] *= curr_coeff[0]
+        for idx in range(1, step_count):
+            scale = curr_coeff[idx] * prefacs[idx] / prefacs[0]
+            _axpy(scale, phia[idx], phia[0])
+
+        return HT_done
+
+    @njit
+    def _propagate_impl(operator, ts, use_maxht, maxht_value, config, scratch, out):
+        _, _, _, _, _, phia, _, _, _, _, _, _ = scratch
+        tt = ts[0]
+        out[0, :] = phia[0, :]
+        for out_idx in range(1, ts.shape[0]):
+            tf = ts[out_idx]
+            while tt < tf:
+                HT = tf - tt
+                if use_maxht and HT > maxht_value:
+                    HT = maxht_value
+                HT_done = _step(operator, tt, HT, config, scratch)
+                if not np.isfinite(HT_done) or HT_done <= 0.0:
+                    raise ValueError("Numba Lanczos backend produced a non-positive propagation step")
+                tt += HT_done
+            out[out_idx, :] = phia[0, :]
+
+    return _propagate_impl
+
+
+_propagate = _build_propagator(_apply_H_operator)
 
 
 def _allocate_scratch(maxsteps, dim):
@@ -298,15 +330,14 @@ class _lanczos_timeprop_numba:
         self.breakdown_tol = 1e-14
         self.config = (maxsteps, target_convg, do_full_order, self.breakdown_tol)
         self.H = H
-        self._registry_handles = []
+        self._propagate_impl = _propagate
 
-        if _is_numba_sum_operator_input(H):
-            self.dim, self.operator, handles = _normalize_sum_operator(H)
-            self._registry_handles.extend(handles)
+        if _is_sum_operator_input(H):
+            self.dim, self.operator, coeff_specs = _normalize_sum_operator(H)
+            self._propagate_impl = _build_propagator(_build_sum_operator(coeff_specs))
             self.scratch = _allocate_scratch(maxsteps, self.dim)
         elif callable(H):
-            self.operator = _register_callable_operator(H)
-            self._registry_handles.append(self.operator)
+            self.operator = _register_callable_object(H)
             self.dim = None
             self.scratch = None
         else:
@@ -314,9 +345,8 @@ class _lanczos_timeprop_numba:
             self.scratch = _allocate_scratch(maxsteps, self.dim)
 
     def __del__(self):
-        for handle in self._registry_handles:
-            if handle in _CALLABLE_OPERATOR_REGISTRY:
-                del _CALLABLE_OPERATOR_REGISTRY[handle]
+        if callable(self.H) and hasattr(self, "operator"):
+            _release_callable_object(self.operator)
 
     def propagate(self, phi0, ts, maxHT=None):
         phi0 = np.asarray(phi0, dtype=np.complex128)
@@ -340,12 +370,12 @@ class _lanczos_timeprop_numba:
         use_maxht = maxHT is not None
         maxht_value = 0.0 if maxHT is None else float(maxHT)
 
-        _propagate_numba(self.operator, ts, use_maxht, maxht_value, self.config, self.scratch, out)
+        self._propagate_impl(self.operator, ts, use_maxht, maxht_value, self.config, self.scratch, out)
 
         return out
 
 
-def _is_numba_sum_operator_input(H):
+def _is_sum_operator_input(H):
     if not isinstance(H, (tuple, list)) or len(H) < 2:
         return False
     for term in H[1:]:
