@@ -109,8 +109,8 @@ def test_short_iterative_lanczos_dense_and_sparse_against_expm_multiply():
 
     prop_dense = jftools.short_iterative_lanczos.lanczos_timeprop(H_dense, maxsteps=14, target_convg=1e-12)
     prop_sparse = jftools.short_iterative_lanczos.lanczos_timeprop(H_sparse, maxsteps=14, target_convg=1e-12)
-    assert prop_dense.backend in ("python", "numba")
-    assert prop_sparse.backend in ("python", "numba")
+    assert prop_dense.backend == "numba"
+    assert prop_sparse.backend == "numba"
 
     phis_dense = _run_sil(H_dense, phi0, ts)
     phis_sparse = _run_sil(H_sparse, phi0, ts)
@@ -183,9 +183,6 @@ def test_short_iterative_lanczos_time_dependent_callable_regression():
 @pytest.mark.parametrize("n", [1, 2, 3])
 @pytest.mark.parametrize("backend", ["python", "numba"])
 def test_short_iterative_lanczos_small_dense_diagonal_exact(backend, n):
-    if backend == "numba" and not jftools.short_iterative_lanczos.have_numba_backend:
-        pytest.skip("numba backend not available")
-
     diag_vals = np.linspace(-0.7, 1.1, n)
     H = np.diag(diag_vals).astype(complex)
     phi0 = _normalized_random_state(n, seed=20 + n)
@@ -200,9 +197,6 @@ def test_short_iterative_lanczos_small_dense_diagonal_exact(backend, n):
 
 @pytest.mark.parametrize("backend", ["python", "numba"])
 def test_short_iterative_lanczos_small_callable_diagonal_exact(backend):
-    if backend == "numba" and not jftools.short_iterative_lanczos.have_numba_backend:
-        pytest.skip("numba backend not available")
-
     n = 3
     h0_diag = np.array([0.8, -0.6, 0.2], dtype=float)
     hi_diag = np.array([0.4, 0.1, -0.3], dtype=float)
@@ -227,9 +221,6 @@ def test_short_iterative_lanczos_small_callable_diagonal_exact(backend):
 
 
 def test_short_iterative_lanczos_numba_h0_sum_fk_hk_dense_exact():
-    if not jftools.short_iterative_lanczos.have_numba_backend:
-        pytest.skip("numba backend not available")
-
     n = 3
     h0_diag = np.array([0.8, -0.6, 0.2], dtype=float)
     h1_diag = np.array([0.4, 0.1, -0.3], dtype=float)
@@ -266,9 +257,6 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_dense_exact():
 
 
 def test_short_iterative_lanczos_numba_h0_sum_fk_hk_dense_exact_jit_coeff():
-    if not jftools.short_iterative_lanczos.have_numba_backend:
-        pytest.skip("numba backend not available")
-
     n = 3
     h0_diag = np.array([0.8, -0.6, 0.2], dtype=float)
     h1_diag = np.array([0.4, 0.1, -0.3], dtype=float)
@@ -301,9 +289,6 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_dense_exact_jit_coeff():
 
 
 def test_short_iterative_lanczos_numba_h0_sum_fk_hk_mixed_compiled_coeffs_exact():
-    if not jftools.short_iterative_lanczos.have_numba_backend:
-        pytest.skip("numba backend not available")
-
     n = 3
     h0_diag = np.array([0.7, -0.2, 0.5], dtype=float)
     h1_diag = np.array([0.3, -0.1, 0.2], dtype=float)
@@ -337,9 +322,6 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_mixed_compiled_coeffs_exact(
 
 
 def test_short_iterative_lanczos_numba_h0_sum_fk_hk_csr_matches_callable():
-    if not jftools.short_iterative_lanczos.have_numba_backend:
-        pytest.skip("numba backend not available")
-
     n = 20
     H0 = _make_chain_hamiltonian(n).astype(complex)
     H1 = diags([np.linspace(-1.0, 1.0, n)], [0], shape=(n, n), format="csr").astype(complex)
@@ -370,9 +352,6 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_csr_matches_callable():
 
 
 def test_short_iterative_lanczos_numba_h0_sum_fk_hk_rejects_wrong_cfunc_signature():
-    if not jftools.short_iterative_lanczos.have_numba_backend:
-        pytest.skip("numba backend not available")
-
     H0 = np.diag(np.array([0.2, -0.4], dtype=float)).astype(complex)
     H1 = np.diag(np.array([0.1, 0.3], dtype=float)).astype(complex)
 
@@ -386,9 +365,6 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_rejects_wrong_cfunc_signatur
 
 @pytest.mark.parametrize("backend", ["python", "numba"])
 def test_short_iterative_lanczos_full_basis_completion_stops_cleanly(backend):
-    if backend == "numba" and not jftools.short_iterative_lanczos.have_numba_backend:
-        pytest.skip("numba backend not available")
-
     n = 3
     H = np.array([[0.3, -0.2, 0.05], [-0.2, 0.1, -0.15], [0.05, -0.15, -0.4]], dtype=complex)
     phi0 = _normalized_random_state(n, seed=42)
@@ -410,7 +386,7 @@ def test_short_iterative_lanczos_qutip_h_and_state_compatibility():
 
     phi_np = _normalized_random_state(n, seed=4)
     prop_qobj = jftools.short_iterative_lanczos.lanczos_timeprop(H_qobj, maxsteps=14, target_convg=1e-12)
-    assert prop_qobj.backend in ("python", "numba")
+    assert prop_qobj.backend == "numba"
 
     out_np = _run_sil(H_qobj, phi_np, ts)
     assert isinstance(out_np[-1], np.ndarray)
@@ -438,9 +414,6 @@ def test_short_iterative_lanczos_explicit_python_allowed_for_callable():
 
 
 def test_short_iterative_lanczos_explicit_numba_allowed_for_callable():
-    if not jftools.short_iterative_lanczos.have_numba_backend:
-        pytest.skip("numba backend not available")
-
     def Hfun(t, phi, Hphi):
         Hphi[:] = phi
         return Hphi
@@ -450,9 +423,6 @@ def test_short_iterative_lanczos_explicit_numba_allowed_for_callable():
 
 
 def test_short_iterative_lanczos_auto_prefers_numba_for_static_dense_and_csr():
-    if not jftools.short_iterative_lanczos.have_numba_backend:
-        pytest.skip("numba backend not available")
-
     H_csr = _make_chain_hamiltonian(8)
     H_dense = H_csr.toarray().astype(complex)
 
@@ -465,8 +435,6 @@ def test_short_iterative_lanczos_auto_prefers_numba_for_static_dense_and_csr():
 
 def test_short_iterative_lanczos_auto_falls_back_to_numba_for_callable():
     sil_mod = jftools.short_iterative_lanczos
-    if not sil_mod.have_numba_backend:
-        pytest.skip("numba backend not available")
 
     def Hfun(t, phi, Hphi):
         Hphi[:] = phi

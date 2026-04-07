@@ -4,7 +4,7 @@ import scipy.linalg
 import numpy as np
 import math
 
-from .myjit import jit
+from numba import jit
 
 
 @jit(nopython=True)

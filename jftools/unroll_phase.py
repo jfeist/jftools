@@ -1,5 +1,5 @@
-from .myjit import jit
 import numpy as np
+from numba import jit
 
 
 def unroll_phase(phases):

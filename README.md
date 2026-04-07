@@ -4,14 +4,15 @@ Collection of small useful helper tools for Python by Johannes Feist.
 
 ## Short Iterative Lanczos Backend Selection
 
-The `jftools.short_iterative_lanczos` solver now supports backend auto-dispatch for static Hamiltonians:
+The `jftools.short_iterative_lanczos` solver now assumes the Numba backend is installed as part of the package dependencies.
 
-- `numba` for dense matrices, CSR matrices, and the specialized sum-operator form when Numba is available.
-- `python` for callable Hamiltonians and unsupported formats.
+- `auto` (default) selects `numba`.
+- `numba` forces the Numba implementation.
+- `python` forces the original reference implementation.
 
 Select backend behavior with the `backend` function argument:
 
-- `auto` (default): choose the best available backend.
+- `auto` (default): select the Numba backend.
 - `python`: force the original Python implementation.
 - `numba`: force the Numba backend.
 

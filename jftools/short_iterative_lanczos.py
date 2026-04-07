@@ -5,14 +5,7 @@ from numpy import einsum, empty, exp, log10, vdot, zeros
 from numpy.linalg import norm
 from scipy.linalg import eigh_tridiagonal
 from scipy import sparse as sp
-
-try:
-    from .short_iterative_lanczos_numba import _lanczos_timeprop_numba
-
-    have_numba_backend = True
-except ImportError:
-    _lanczos_timeprop_numba = None
-    have_numba_backend = False
+from .short_iterative_lanczos_numba import _lanczos_timeprop_numba
 
 try:
     import qutip
@@ -264,26 +257,6 @@ class _lanczos_timeprop_reference:
         return HT_done
 
 
-def _is_dense_matrix(H):
-    return isinstance(H, np.ndarray) and H.ndim == 2 and H.shape[0] == H.shape[1]
-
-
-def _is_csr_matrix(H):
-    if sp.isspmatrix_csr(H):
-        return True
-    csr_array = getattr(sp, "csr_array", None)
-    return csr_array is not None and isinstance(H, csr_array)
-
-
-def _is_numba_sum_operator(H):
-    if not isinstance(H, (tuple, list)) or len(H) < 2:
-        return False
-    for term in H[1:]:
-        if not isinstance(term, (tuple, list)) or len(term) != 2 or not callable(term[1]):
-            return False
-    return True
-
-
 def _select_backend(H, backend):
     backend = backend.strip().lower()
 
@@ -291,18 +264,12 @@ def _select_backend(H, backend):
         return "python"
 
     if backend == "numba":
-        if not have_numba_backend:
-            raise ValueError("backend='numba' requested but Numba backend is not available.")
         return "numba"
 
     if backend != "auto":
         raise ValueError("Unknown backend value '%s'. Valid values are 'python', 'numba', 'auto'." % backend)
 
-    if have_numba_backend and (_is_dense_matrix(H) or _is_csr_matrix(H) or _is_numba_sum_operator(H)):
-        return "numba"
-    if have_numba_backend:
-        return "numba"
-    return "python"
+    return "numba"
 
 
 class lanczos_timeprop:
