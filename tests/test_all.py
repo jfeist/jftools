@@ -5,7 +5,7 @@ import pytest
 from numba import cfunc, jit, njit
 from numba.core import types
 from scipy.sparse import diags
-from scipy.sparse.linalg import LinearOperator, expm_multiply
+from scipy.sparse.linalg import expm_multiply
 
 import jftools
 
@@ -109,8 +109,8 @@ def test_short_iterative_lanczos_dense_and_sparse_against_expm_multiply():
 
     prop_dense = jftools.short_iterative_lanczos.lanczos_timeprop(H_dense, maxsteps=14, target_convg=1e-12)
     prop_sparse = jftools.short_iterative_lanczos.lanczos_timeprop(H_sparse, maxsteps=14, target_convg=1e-12)
-    assert prop_dense.backend in ("python", "numba", "cython")
-    assert prop_sparse.backend in ("python", "numba", "cython")
+    assert prop_dense.backend in ("python", "numba")
+    assert prop_sparse.backend in ("python", "numba")
 
     phis_dense = _run_sil(H_dense, phi0, ts)
     phis_sparse = _run_sil(H_sparse, phi0, ts)
@@ -181,12 +181,10 @@ def test_short_iterative_lanczos_time_dependent_callable_regression():
 
 
 @pytest.mark.parametrize("n", [1, 2, 3])
-@pytest.mark.parametrize("backend", ["python", "numba", "cython"])
+@pytest.mark.parametrize("backend", ["python", "numba"])
 def test_short_iterative_lanczos_small_dense_diagonal_exact(backend, n):
     if backend == "numba" and not jftools.short_iterative_lanczos.have_numba_backend:
         pytest.skip("numba backend not available")
-    if backend == "cython" and not jftools.short_iterative_lanczos.have_cython_backend:
-        pytest.skip("cython backend not available")
 
     diag_vals = np.linspace(-0.7, 1.1, n)
     H = np.diag(diag_vals).astype(complex)
@@ -200,12 +198,10 @@ def test_short_iterative_lanczos_small_dense_diagonal_exact(backend, n):
         assert np.allclose(phi, phi_ref, rtol=5e-11, atol=5e-13)
 
 
-@pytest.mark.parametrize("backend", ["python", "numba", "cython"])
+@pytest.mark.parametrize("backend", ["python", "numba"])
 def test_short_iterative_lanczos_small_callable_diagonal_exact(backend):
     if backend == "numba" and not jftools.short_iterative_lanczos.have_numba_backend:
         pytest.skip("numba backend not available")
-    if backend == "cython" and not jftools.short_iterative_lanczos.have_cython_backend:
-        pytest.skip("cython backend not available")
 
     n = 3
     h0_diag = np.array([0.8, -0.6, 0.2], dtype=float)
@@ -388,12 +384,10 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_rejects_wrong_cfunc_signatur
         jftools.short_iterative_lanczos.lanczos_timeprop((H0, (H1, bad_coeff)), maxsteps=6, target_convg=1e-12, backend="numba")
 
 
-@pytest.mark.parametrize("backend", ["python", "numba", "cython"])
+@pytest.mark.parametrize("backend", ["python", "numba"])
 def test_short_iterative_lanczos_full_basis_completion_stops_cleanly(backend):
     if backend == "numba" and not jftools.short_iterative_lanczos.have_numba_backend:
         pytest.skip("numba backend not available")
-    if backend == "cython" and not jftools.short_iterative_lanczos.have_cython_backend:
-        pytest.skip("cython backend not available")
 
     n = 3
     H = np.array([[0.3, -0.2, 0.05], [-0.2, 0.1, -0.15], [0.05, -0.15, -0.4]], dtype=complex)
@@ -416,7 +410,7 @@ def test_short_iterative_lanczos_qutip_h_and_state_compatibility():
 
     phi_np = _normalized_random_state(n, seed=4)
     prop_qobj = jftools.short_iterative_lanczos.lanczos_timeprop(H_qobj, maxsteps=14, target_convg=1e-12)
-    assert prop_qobj.backend in ("python", "numba", "cython")
+    assert prop_qobj.backend in ("python", "numba")
 
     out_np = _run_sil(H_qobj, phi_np, ts)
     assert isinstance(out_np[-1], np.ndarray)
@@ -469,37 +463,7 @@ def test_short_iterative_lanczos_auto_prefers_numba_for_static_dense_and_csr():
     assert prop_csr.backend == "numba"
 
 
-def test_short_iterative_lanczos_explicit_cython_callable_needs_no_dim():
-    if not jftools.short_iterative_lanczos.have_cython_backend:
-        pytest.skip("cython backend not available")
-
-    n = 12
-    H_dense = _make_chain_hamiltonian(n).toarray().astype(complex)
-    phi0 = _normalized_random_state(n, seed=11)
-    ts = np.linspace(0.0, 0.3, 4)
-
-    def Hfun(t, phi, Hphi):
-        Hphi[:] = H_dense.dot(phi)
-
-    prop = jftools.short_iterative_lanczos.lanczos_timeprop(Hfun, maxsteps=14, target_convg=1e-12, backend="cython")
-    assert prop.backend == "cython"
-
-    out_cython = prop.propagate(phi0, ts, maxHT=0.05)
-    out_python = jftools.short_iterative_lanczos.sesolve_lanczos(Hfun, phi0, ts, maxsteps=14, target_convg=1e-12, maxHT=0.05, backend="python")
-
-    for phi_cython, phi_python in zip(out_cython, out_python):
-        assert np.allclose(phi_cython, phi_python, rtol=5e-10, atol=5e-12)
-
-
-def test_short_iterative_lanczos_explicit_cython_unavailable_no_fallback(monkeypatch):
-    sil_mod = jftools.short_iterative_lanczos
-    H = _make_chain_hamiltonian(8)
-    monkeypatch.setattr(sil_mod, "have_cython_backend", False)
-    with pytest.raises(ValueError, match="backend='cython' requested but Cython backend extension is not available"):
-        sil_mod.lanczos_timeprop(H, maxsteps=8, target_convg=1e-12, backend="cython")
-
-
-def test_short_iterative_lanczos_auto_falls_back_to_numba_for_callable(monkeypatch):
+def test_short_iterative_lanczos_auto_falls_back_to_numba_for_callable():
     sil_mod = jftools.short_iterative_lanczos
     if not sil_mod.have_numba_backend:
         pytest.skip("numba backend not available")
@@ -508,30 +472,5 @@ def test_short_iterative_lanczos_auto_falls_back_to_numba_for_callable(monkeypat
         Hphi[:] = phi
         return Hphi
 
-    monkeypatch.setattr(sil_mod, "have_cython_backend", False)
     prop = sil_mod.lanczos_timeprop(Hfun, maxsteps=8, target_convg=1e-12, backend="auto")
     assert prop.backend == "numba"
-
-
-def test_short_iterative_lanczos_auto_prefers_cython_for_linear_operator():
-    if not jftools.short_iterative_lanczos.have_cython_backend:
-        pytest.skip("cython backend not available")
-
-    n = 10
-    H_dense = _make_chain_hamiltonian(n).toarray().astype(complex)
-    phi0 = _normalized_random_state(n, seed=13)
-    ts = np.linspace(0.0, 0.25, 4)
-
-    H_linop = LinearOperator(shape=(n, n), matvec=lambda x: H_dense.dot(x), dtype=np.complex128)
-
-    def Hfun(t, phi, Hphi):
-        Hphi[:] = H_linop(phi)
-
-    prop_auto = jftools.short_iterative_lanczos.lanczos_timeprop(Hfun, maxsteps=12, target_convg=1e-12, backend="auto")
-    assert prop_auto.backend == "cython"
-
-    out_auto = prop_auto.propagate(phi0, ts, maxHT=0.05)
-    out_python = jftools.short_iterative_lanczos.sesolve_lanczos(Hfun, phi0, ts, maxsteps=12, target_convg=1e-12, maxHT=0.05, backend="python")
-
-    for phi_auto, phi_py in zip(out_auto, out_python):
-        assert np.allclose(phi_auto, phi_py, rtol=5e-9, atol=5e-11)

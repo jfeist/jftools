@@ -7,14 +7,6 @@ from scipy.linalg import eigh_tridiagonal
 from scipy import sparse as sp
 
 try:
-    from .short_iterative_lanczos_cython import _lanczos_timeprop_cython
-
-    have_cython_backend = True
-except ImportError:
-    _lanczos_timeprop_cython = None
-    have_cython_backend = False
-
-try:
     from .short_iterative_lanczos_numba import _lanczos_timeprop_numba
 
     have_numba_backend = True
@@ -303,18 +295,11 @@ def _select_backend(H, backend):
             raise ValueError("backend='numba' requested but Numba backend is not available.")
         return "numba"
 
-    if backend == "cython":
-        if not have_cython_backend:
-            raise ValueError("backend='cython' requested but Cython backend extension is not available.")
-        return "cython"
-
     if backend != "auto":
-        raise ValueError("Unknown backend value '%s'. Valid values are 'python', 'numba', 'cython', 'auto'." % backend)
+        raise ValueError("Unknown backend value '%s'. Valid values are 'python', 'numba', 'auto'." % backend)
 
     if have_numba_backend and (_is_dense_matrix(H) or _is_csr_matrix(H) or _is_numba_sum_operator(H)):
         return "numba"
-    if have_cython_backend:
-        return "cython"
     if have_numba_backend:
         return "numba"
     return "python"
@@ -327,11 +312,6 @@ class lanczos_timeprop:
         self.backend = _select_backend(H, backend)
         if self.backend == "numba":
             self._impl = _lanczos_timeprop_numba(H, maxsteps, target_convg, debug, do_full_order)
-        elif self.backend == "cython":
-            if not (_is_dense_matrix(H) or _is_csr_matrix(H)):
-                H = _as_hfun(H)
-
-            self._impl = _lanczos_timeprop_cython(H, maxsteps, target_convg, debug, do_full_order)
         else:
             self._impl = _lanczos_timeprop_reference(H, maxsteps, target_convg, debug, do_full_order)
 

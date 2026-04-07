@@ -1,6 +1,6 @@
 [build-system]
-requires = ["meson-python>=0.16", "meson>=1.4", "ninja", "Cython>=3.0", "numpy>=2.0", "scipy>=1.13"]
-build-backend = "mesonpy"
+requires = ["flit_core>=3.10,<4"]
+build-backend = "flit_core.buildapi"
 
 [project]
 name = "jftools"
@@ -27,10 +27,7 @@ Home = "https://github.com/jfeist/jftools"
 
 [dependency-groups]
 dev = [
-    "meson-python>=0.16",
-    "meson>=1.4",
-    "ninja",
-    "Cython>=3.0",
+    "flit>=3.10",
     "pytest>=8.3",
 ]
 
@@ -38,13 +35,6 @@ dev = [
 line-length = 200
 [tool.ruff.format]
 skip-magic-trailing-comma = true
-
-[tool.cibuildwheel]
-build = "cp312-* cp313-* cp314-*"
-skip = ["pp*", "*-win32", "*-manylinux_i686", "*-musllinux_*"]
-build-verbosity = 1
-test-requires = ["pytest>=8.3"]
-test-command = "pytest {project}/tests -q"
 
 [tool.uv.sources]
 numba-lapack = { git = "https://github.com/MTZ-dev/numba-lapack.git" }

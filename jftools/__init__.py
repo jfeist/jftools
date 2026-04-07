@@ -1,8 +1,6 @@
 """Collection of small useful helper tools for Python by Johannes Feist."""
 
-from importlib.resources import files
-
-__version__ = files(__package__).joinpath("_version.txt").read_text(encoding="utf-8").strip()
+__version__ = "0.5.0"
 
 __all__ = ["shade_color", "tic", "toc", "ipynbimport_install", "unroll_phase", "interp_cmplx", "plotcolored", "fedvr", "short_iterative_lanczos"]
 
