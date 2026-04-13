@@ -76,10 +76,44 @@ def _qobj_state_io(phi0):
     return phi0_arr, get_phi_out
 
 
+def _is_dense_matrix(H):
+    return isinstance(H, np.ndarray) and H.ndim == 2 and H.shape[0] == H.shape[1]
+
+
+def _is_csr_matrix(H):
+    if sp.isspmatrix_csr(H):
+        return True
+    csr_array = getattr(sp, "csr_array", None)
+    return csr_array is not None and isinstance(H, csr_array)
+
+
+def _is_numba_sum_operator(H):
+    if not isinstance(H, (tuple, list)) or len(H) < 2:
+        return False
+    for term in H[1:]:
+        if not isinstance(term, (tuple, list)) or len(term) != 2 or not callable(term[1]):
+            return False
+    return True
+
+
+def _is_qutip_state(phi0):
+    return have_qutip and isinstance(phi0, qutip.Qobj)
+
+
+def _is_numba_state(phi0):
+    return isinstance(phi0, np.ndarray) or _is_qutip_state(phi0)
+
+
+def _is_numba_operator(H):
+    return callable(H) or _is_dense_matrix(H) or _is_csr_matrix(H) or _is_numba_sum_operator(H)
+
+
+def _can_use_numba_backend(H, phi0):
+    return _is_numba_operator(H) and _is_numba_state(phi0)
+
+
 class _lanczos_timeprop_reference:
     def __init__(self, H, maxsteps, target_convg, debug=0, do_full_order=False):
-        if have_qutip and isinstance(H, qutip.Qobj):
-            H = _qobj_to_matrix(H)
         self.Hfun = _as_hfun(H)
 
         self.maxsteps = maxsteps
@@ -96,10 +130,7 @@ class _lanczos_timeprop_reference:
 
     def propagate(self, phi0, ts, maxHT=None):
         phi0 = np.asarray(phi0).view(normdotndarray)
-
         self.phia = [phi0.copy() for _ in range(self.maxsteps + 1)]
-
-        ids = np.array([id(x) for x in self.phia])
 
         tt = ts[0]
         phis = [phi0.view(np.ndarray).copy()]
@@ -111,9 +142,6 @@ class _lanczos_timeprop_reference:
                 HT_done = self._step(tt, HT)
                 tt += HT_done
             phis.append(self.phia[0].view(np.ndarray).copy())
-
-        if not np.all(ids == np.array([id(x) for x in self.phia])):
-            warnings.warn("self.phia have not been updated in-place!")
 
         return phis
 
@@ -257,54 +285,68 @@ class _lanczos_timeprop_reference:
         return HT_done
 
 
-def _select_backend(H, backend):
+def _normalize_backend(backend):
     backend = backend.strip().lower()
-
-    if backend == "python":
-        return "python"
-
-    if backend == "numba":
-        return "numba"
-
-    if backend != "auto":
+    if backend not in ("python", "numba", "auto"):
         raise ValueError("Unknown backend value '%s'. Valid values are 'python', 'numba', 'auto'." % backend)
-
-    return "numba"
+    return backend
 
 
 class lanczos_timeprop:
     def __init__(self, H, maxsteps, target_convg, debug=0, do_full_order=False, backend="auto"):
         if have_qutip and isinstance(H, qutip.Qobj):
             H = _qobj_to_matrix(H)
-        self.backend = _select_backend(H, backend)
-        if self.backend == "numba":
-            self._impl = _lanczos_timeprop_numba(H, maxsteps, target_convg, debug, do_full_order)
+        self._H = H
+        self.maxsteps = maxsteps
+        self.target_convg = target_convg
+        self.debug = debug
+        self.do_full_order = do_full_order
+        self.backend_request = _normalize_backend(backend)
+        self.backend = self.backend_request
+        self._impl = None
+
+    def _select_backend(self, phi0):
+        if self.backend_request == "auto":
+            if _can_use_numba_backend(self._H, phi0):
+                backend = "numba"
+            elif isinstance(phi0, np.ndarray) or _is_qutip_state(phi0):
+                backend = "python"
+            else:
+                raise TypeError(
+                    "backend='auto' could not find a compatible implementation for the given Hamiltonian/state combination. "
+                    "Use numpy.ndarray or qutip.Qobj states."
+                )
         else:
-            self._impl = _lanczos_timeprop_reference(H, maxsteps, target_convg, debug, do_full_order)
+            backend = self.backend_request
+
+        if backend != self.backend or self._impl is None:
+            self.backend = backend
+            if backend == "python":
+                self._impl = _lanczos_timeprop_reference(self._H, self.maxsteps, self.target_convg, self.debug, self.do_full_order)
+            else:
+                self._impl = _lanczos_timeprop_numba(self._H, self.maxsteps, self.target_convg, self.debug, self.do_full_order)
 
     def propagate(self, phi0, ts, maxHT=None):
         ts = np.asarray(ts, dtype=float)
         assert ts.ndim == 1, "ts must be a 1d array"
 
-        def get_phi_out(x):
-            return np.asarray(x)
+        self._select_backend(phi0)
 
+        get_phi_out = None
         if isinstance(phi0, np.ndarray):
-            phi0_arr = np.asarray(phi0, dtype=np.complex128).reshape(-1)
-        elif have_qutip and isinstance(phi0, qutip.Qobj):
-            phi0_arr, get_phi_out = _qobj_state_io(phi0)
-            phi0_arr = np.asarray(phi0_arr, dtype=np.complex128).reshape(-1)
+            phi_in = phi0 if self.backend == "python" else np.asarray(phi0, dtype=np.complex128).reshape(-1)
+            if self.backend == "numba":
+                get_phi_out = np.asarray
+        elif _is_qutip_state(phi0):
+            phi_in, get_phi_out = _qobj_state_io(phi0)
+            phi_in = np.asarray(phi_in, dtype=np.complex128).reshape(-1)
         else:
-            raise TypeError("lanczos_timeprop only supports numpy.ndarray and qutip.Qobj states")
+            raise TypeError("Python backend only supports numpy.ndarray and qutip.Qobj states")
 
-        out = self._impl.propagate(phi0_arr, ts, maxHT)
-        return [get_phi_out(x) for x in out]
-
-    def _step(self, t, HT):
-        return self._impl._step(t, HT)
-
-    def __getattr__(self, name):
-        return getattr(self._impl, name)
+        out = self._impl.propagate(phi_in, ts, maxHT)
+        if get_phi_out is not None:
+            return [get_phi_out(x) for x in out]
+        return out
 
 
 def sesolve_lanczos(H, phi0, ts, maxsteps, target_convg, maxHT=None, debug=0, do_full_order=False, backend="auto"):

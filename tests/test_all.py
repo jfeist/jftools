@@ -109,6 +109,8 @@ def test_short_iterative_lanczos_dense_and_sparse_against_expm_multiply():
 
     prop_dense = jftools.short_iterative_lanczos.lanczos_timeprop(H_dense, maxsteps=14, target_convg=1e-12)
     prop_sparse = jftools.short_iterative_lanczos.lanczos_timeprop(H_sparse, maxsteps=14, target_convg=1e-12)
+    prop_dense.propagate(phi0, ts[:2], maxHT=0.1)
+    prop_sparse.propagate(phi0, ts[:2], maxHT=0.1)
     assert prop_dense.backend == "numba"
     assert prop_sparse.backend == "numba"
 
@@ -244,9 +246,8 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_dense_exact():
 
     H_numba = (H0, (H1, f1), (H2, f2))
     prop = jftools.short_iterative_lanczos.lanczos_timeprop(H_numba, maxsteps=8, target_convg=1e-13, backend="auto")
-    assert prop.backend == "numba"
-
     out = prop.propagate(phi0, ts, maxHT=2e-4)
+    assert prop.backend == "numba"
 
     for t, phi in zip(ts, out):
         theta = h0_diag * t
@@ -354,13 +355,17 @@ def test_short_iterative_lanczos_numba_h0_sum_fk_hk_csr_matches_callable():
 def test_short_iterative_lanczos_numba_h0_sum_fk_hk_rejects_wrong_cfunc_signature():
     H0 = np.diag(np.array([0.2, -0.4], dtype=float)).astype(complex)
     H1 = np.diag(np.array([0.1, 0.3], dtype=float)).astype(complex)
+    phi0 = _normalized_random_state(2, seed=71)
+    ts = np.array([0.0, 0.1], dtype=float)
 
     @cfunc(types.float64(types.float64))
     def bad_coeff(t):
         return np.cos(t)
 
+    prop = jftools.short_iterative_lanczos.lanczos_timeprop((H0, (H1, bad_coeff)), maxsteps=6, target_convg=1e-12, backend="numba")
+
     with pytest.raises(TypeError, match=r"complex128\(float64\)"):
-        jftools.short_iterative_lanczos.lanczos_timeprop((H0, (H1, bad_coeff)), maxsteps=6, target_convg=1e-12, backend="numba")
+        prop.propagate(phi0, ts, maxHT=0.1)
 
 
 @pytest.mark.parametrize("backend", ["python", "numba"])
@@ -386,9 +391,9 @@ def test_short_iterative_lanczos_qutip_h_and_state_compatibility():
 
     phi_np = _normalized_random_state(n, seed=4)
     prop_qobj = jftools.short_iterative_lanczos.lanczos_timeprop(H_qobj, maxsteps=14, target_convg=1e-12)
+    out_np = prop_qobj.propagate(phi_np, ts, maxHT=0.1)
     assert prop_qobj.backend == "numba"
 
-    out_np = _run_sil(H_qobj, phi_np, ts)
     assert isinstance(out_np[-1], np.ndarray)
 
     phi_qobj = qutip.Qobj(phi_np)
@@ -425,20 +430,27 @@ def test_short_iterative_lanczos_explicit_numba_allowed_for_callable():
 def test_short_iterative_lanczos_auto_prefers_numba_for_static_dense_and_csr():
     H_csr = _make_chain_hamiltonian(8)
     H_dense = H_csr.toarray().astype(complex)
+    phi0 = _normalized_random_state(8, seed=81)
 
     prop_dense = jftools.short_iterative_lanczos.lanczos_timeprop(H_dense, maxsteps=8, target_convg=1e-12, backend="auto")
     prop_csr = jftools.short_iterative_lanczos.lanczos_timeprop(H_csr, maxsteps=8, target_convg=1e-12, backend="auto")
+
+    prop_dense.propagate(phi0, np.array([0.0, 0.1]), maxHT=0.1)
+    prop_csr.propagate(phi0, np.array([0.0, 0.1]), maxHT=0.1)
 
     assert prop_dense.backend == "numba"
     assert prop_csr.backend == "numba"
 
 
-def test_short_iterative_lanczos_auto_falls_back_to_numba_for_callable():
+def test_short_iterative_lanczos_auto_prefers_numba_for_callable_array_state():
     sil_mod = jftools.short_iterative_lanczos
+    phi0 = _normalized_random_state(8, seed=82)
+    ts = np.array([0.0, 0.1], dtype=float)
 
     def Hfun(t, phi, Hphi):
         Hphi[:] = phi
         return Hphi
 
     prop = sil_mod.lanczos_timeprop(Hfun, maxsteps=8, target_convg=1e-12, backend="auto")
+    prop.propagate(phi0, ts, maxHT=0.1)
     assert prop.backend == "numba"

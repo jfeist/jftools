@@ -4,22 +4,28 @@ Collection of small useful helper tools for Python by Johannes Feist.
 
 ## Short Iterative Lanczos Backend Selection
 
-The `jftools.short_iterative_lanczos` solver now assumes the Numba backend is installed as part of the package dependencies.
+The `jftools.short_iterative_lanczos` solver provides two backends:
 
-- `auto` (default) selects `numba`.
-- `numba` forces the Numba implementation.
-- `python` forces the original reference implementation.
+- `numba` for array-based propagation.
+- `python` for the reference implementation.
 
 Select backend behavior with the `backend` function argument:
 
-- `auto` (default): select the Numba backend.
+- `auto` (default): select `numba` only when both the Hamiltonian and the input state are compatible with the Numba implementation; otherwise fall back to `python`.
 - `python`: force the original Python implementation.
 - `numba`: force the Numba backend.
+
+Current Numba compatibility is intentionally narrower than the Python backend:
+
+- States must be `numpy.ndarray` (converted to `complex128`) or `qutip.Qobj` states.
+- Hamiltonians may be dense NumPy arrays, SciPy CSR matrices/arrays, callable `Hfun(t, phi, Hphi)` operators working on array states, or the specialized sum-operator form `(H0, (H1, f1), ...)`.
+
+The Python backend uses the same NumPy/Qobj-style state handling as the reference implementation.
 
 Example:
 
 ```python
-prop = jftools.short_iterative_lanczos.lanczos_timeprop(H, maxsteps=14, target_convg=1e-12, backend="numba")
+prop = jftools.short_iterative_lanczos.lanczos_timeprop(H, maxsteps=14, target_convg=1e-12, backend="auto")
 ```
 
 ## Installation
