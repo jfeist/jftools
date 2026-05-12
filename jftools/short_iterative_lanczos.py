@@ -45,10 +45,8 @@ def _qobj_to_matrix(H):
     return np.asarray(H)
 
 
-def _matvec(H, phi):
-    if hasattr(H, "dot"):
-        return H.dot(phi)
-    return H @ phi
+def _matvec_fun(H):
+    return H.dot if hasattr(H, "dot") else H.__matmul__
 
 
 def _as_hfun(H):
@@ -56,7 +54,21 @@ def _as_hfun(H):
     if callable(H):
         return H
 
-    H_f = H.dot if hasattr(H, "dot") else H.__matmul__
+    if _is_sum_operator_input(H):
+        H0_f = _matvec_fun(H[0])
+        terms = []
+        for term in H[1:]:
+            Hk, fk = term
+            terms.append((_matvec_fun(Hk), fk))
+
+        def Hfun(t, phi, Hphi):
+            Hphi[:] = H0_f(phi)
+            for Hk_f, fk in terms:
+                Hphi[:] += fk(t) * Hk_f(phi)
+
+        return Hfun
+
+    H_f = _matvec_fun(H)
 
     def Hfun(t, phi, Hphi):
         Hphi[:] = H_f(phi)
@@ -96,6 +108,15 @@ def _is_numba_sum_operator(H):
     return True
 
 
+def _is_sum_operator_input(H):
+    if not isinstance(H, (tuple, list)) or len(H) < 2:
+        return False
+    for term in H[1:]:
+        if not isinstance(term, (tuple, list)) or len(term) != 2 or not callable(term[1]):
+            return False
+    return True
+
+
 def _is_qutip_state(phi0):
     return have_qutip and isinstance(phi0, qutip.Qobj)
 
@@ -105,7 +126,7 @@ def _is_numba_state(phi0):
 
 
 def _is_numba_operator(H):
-    return callable(H) or _is_dense_matrix(H) or _is_csr_matrix(H) or _is_numba_sum_operator(H)
+    return _is_dense_matrix(H) or _is_csr_matrix(H) or _is_numba_sum_operator(H)
 
 
 def _can_use_numba_backend(H, phi0):
@@ -285,13 +306,6 @@ class _lanczos_timeprop_reference:
         return HT_done
 
 
-def _normalize_backend(backend):
-    backend = backend.strip().lower()
-    if backend not in ("python", "numba", "auto"):
-        raise ValueError("Unknown backend value '%s'. Valid values are 'python', 'numba', 'auto'." % backend)
-    return backend
-
-
 class lanczos_timeprop:
     def __init__(self, H, maxsteps, target_convg, debug=0, do_full_order=False, backend="auto"):
         if have_qutip and isinstance(H, qutip.Qobj):
@@ -301,7 +315,9 @@ class lanczos_timeprop:
         self.target_convg = target_convg
         self.debug = debug
         self.do_full_order = do_full_order
-        self.backend_request = _normalize_backend(backend)
+        self.backend_request = backend.strip().lower()
+        if self.backend_request not in ("python", "numba", "auto"):
+            raise ValueError("Unknown backend value '%s'. Valid values are 'python', 'numba', 'auto'." % self.backend_request)
         self.backend = self.backend_request
         self._impl = None
 

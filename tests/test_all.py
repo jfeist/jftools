@@ -197,8 +197,7 @@ def test_short_iterative_lanczos_small_dense_diagonal_exact(backend, n):
         assert np.allclose(phi, phi_ref, rtol=5e-11, atol=5e-13)
 
 
-@pytest.mark.parametrize("backend", ["python", "numba"])
-def test_short_iterative_lanczos_small_callable_diagonal_exact(backend):
+def test_short_iterative_lanczos_small_callable_diagonal_exact_python():
     n = 3
     h0_diag = np.array([0.8, -0.6, 0.2], dtype=float)
     hi_diag = np.array([0.4, 0.1, -0.3], dtype=float)
@@ -214,10 +213,32 @@ def test_short_iterative_lanczos_small_callable_diagonal_exact(backend):
         Hphi[:] += np.cos(omega * t) * HI.dot(phi)
         return Hphi
 
-    out = jftools.short_iterative_lanczos.sesolve_lanczos(Hfun, phi0, ts, maxsteps=8, target_convg=1e-13, maxHT=2e-4, backend=backend)
+    out = jftools.short_iterative_lanczos.sesolve_lanczos(Hfun, phi0, ts, maxsteps=8, target_convg=1e-13, maxHT=2e-4, backend="python")
 
     for t, phi in zip(ts, out):
         theta = h0_diag * t + (hi_diag / omega) * np.sin(omega * t)
+        phi_ref = np.exp(-1j * theta) * phi0
+        assert np.allclose(phi, phi_ref, rtol=2e-4, atol=1e-6)
+
+
+def test_short_iterative_lanczos_small_tuple_time_dependent_exact_python():
+    n = 3
+    h0_diag = np.array([0.8, -0.6, 0.2], dtype=float)
+    h1_diag = np.array([0.4, 0.1, -0.3], dtype=float)
+    omega = 2.3
+    phi0 = _normalized_random_state(n, seed=132)
+    ts = np.linspace(0.0, 0.6, 5)
+
+    H0 = np.diag(h0_diag).astype(complex)
+    H1 = np.diag(h1_diag).astype(complex)
+
+    def f1(t):
+        return np.cos(omega * t)
+
+    out = jftools.short_iterative_lanczos.sesolve_lanczos((H0, (H1, f1)), phi0, ts, maxsteps=8, target_convg=1e-13, maxHT=2e-4, backend="python")
+
+    for t, phi in zip(ts, out):
+        theta = h0_diag * t + (h1_diag / omega) * np.sin(omega * t)
         phi_ref = np.exp(-1j * theta) * phi0
         assert np.allclose(phi, phi_ref, rtol=2e-4, atol=1e-6)
 
@@ -418,13 +439,15 @@ def test_short_iterative_lanczos_explicit_python_allowed_for_callable():
     assert prop.backend == "python"
 
 
-def test_short_iterative_lanczos_explicit_numba_allowed_for_callable():
+def test_short_iterative_lanczos_explicit_numba_rejects_callable():
     def Hfun(t, phi, Hphi):
         Hphi[:] = phi
         return Hphi
 
     prop = jftools.short_iterative_lanczos.lanczos_timeprop(Hfun, maxsteps=8, target_convg=1e-12, backend="numba")
-    assert prop.backend == "numba"
+
+    with pytest.raises(TypeError, match="does not support callable operators"):
+        prop.propagate(_normalized_random_state(8, seed=83), np.array([0.0, 0.1]), maxHT=0.1)
 
 
 def test_short_iterative_lanczos_auto_prefers_numba_for_static_dense_and_csr():
@@ -442,7 +465,7 @@ def test_short_iterative_lanczos_auto_prefers_numba_for_static_dense_and_csr():
     assert prop_csr.backend == "numba"
 
 
-def test_short_iterative_lanczos_auto_prefers_numba_for_callable_array_state():
+def test_short_iterative_lanczos_auto_uses_python_for_callable_array_state():
     sil_mod = jftools.short_iterative_lanczos
     phi0 = _normalized_random_state(8, seed=82)
     ts = np.array([0.0, 0.1], dtype=float)
@@ -453,4 +476,4 @@ def test_short_iterative_lanczos_auto_prefers_numba_for_callable_array_state():
 
     prop = sil_mod.lanczos_timeprop(Hfun, maxsteps=8, target_convg=1e-12, backend="auto")
     prop.propagate(phi0, ts, maxHT=0.1)
-    assert prop.backend == "numba"
+    assert prop.backend == "python"

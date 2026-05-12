@@ -8,24 +8,6 @@ from numba_lapack import dstevd, zgemm
 from scipy import sparse as sp
 
 _SUM_PROPAGATORS = {}
-_CALLABLE_OBJECTS = {}
-
-
-def _register_callable_object(callable_object):
-    handle = id(callable_object)
-    entry = _CALLABLE_OBJECTS.get(handle, (callable_object, 0))
-    _CALLABLE_OBJECTS[handle] = (entry[0], entry[1] + 1)
-    return handle
-
-
-def _release_callable_object(handle):
-    callable_object, refcount = _CALLABLE_OBJECTS.get(handle, (None, 0))
-    if callable_object is None:
-        return
-    if refcount <= 1:
-        del _CALLABLE_OBJECTS[handle]
-    else:
-        _CALLABLE_OBJECTS[handle] = (callable_object, refcount - 1)
 
 
 def _evaluate_operator_coefficient(coeff_spec, t):
@@ -48,7 +30,7 @@ def _overload_evaluate_operator_coefficient(coeff_spec, t):
 
         return impl
 
-    raise TypeError("Coefficient spec must be a callable handle, cfunc, or a Numba-jitted function")
+    raise TypeError("Coefficient spec must be a cfunc or a Numba-jitted function")
 
 
 @njit(cache=True)
@@ -110,16 +92,8 @@ def _overload_apply_H_operator(H, t, x, y, alpha, beta):
             charN = np.uint8(ord("N"))
             zgemm(charN, charN, H.shape[0], 1, H.shape[1], alpha, H, H.shape[0], x, x.shape[0], beta, y, y.shape[0])
 
-    elif isinstance(H, types.Integer):
-
-        def impl(H, t, x, y, alpha, beta):
-            if alpha != 1.0 + 0.0j or beta != 0.0 + 0.0j:
-                raise ValueError("Scaling not supported for callable operators in Numba Lanczos backend")
-            with objmode():
-                _CALLABLE_OBJECTS[H][0](t, x, y)
-
     else:
-        raise TypeError("Numba Lanczos operator must be dense array, CSR tuple, or callable handle")
+        raise TypeError("Numba Lanczos operator must be a dense array, CSR tuple, or (H0, (H1, f1), ...) operator sum")
 
     return impl
 
@@ -146,6 +120,9 @@ def _calc_coeff(step, HT, coeff, scratch):
 
 
 def _normalize_static_operator(H):
+    if callable(H):
+        raise TypeError("Numba Lanczos backend does not support callable operators; use backend='python' or provide dense/CSR matrices (or (H0, (H1, f1), ...) operator sums)")
+
     if sp.isspmatrix_csr(H) or (hasattr(sp, "csr_array") and isinstance(H, sp.csr_array)):
         H_csr = sp.csr_matrix(H).astype(np.complex128)
         return (H_csr.shape[0], (H_csr.data, H_csr.indices.astype(np.int64), H_csr.indptr.astype(np.int64)))
@@ -168,16 +145,13 @@ def _normalize_sum_operator(H):
     for term in H[1:]:
         if not isinstance(term, (tuple, list)) or len(term) != 2:
             raise TypeError("Time-dependent Numba operator terms must be (H_k, f_k) pairs")
-        Hk, fk = term
+        Hk, coeff_spec = term
+        if _is_compiled_coefficient_function(coeff_spec):
+            if isinstance(coeff_spec, CFunc) and (coeff_spec._sig.args != (types.float64,) or coeff_spec._sig.return_type != types.complex128):
+                raise TypeError("Numba cfunc coefficient functions must have signature complex128(float64)")
         Hk_dim, Hk_norm = _normalize_static_operator(Hk)
         if Hk_dim != dim:
             raise ValueError("All H_k operators must match the dimension of H_0")
-        if _is_compiled_coefficient_function(fk):
-            if isinstance(fk, CFunc) and (fk._sig.args != (types.float64,) or fk._sig.return_type != types.complex128):
-                raise TypeError("Numba cfunc coefficient functions must have signature complex128(float64)")
-            coeff_spec = fk
-        else:
-            coeff_spec = fk
         H_ops.append(Hk_norm)
         coeff_specs.append(coeff_spec)
 
@@ -341,38 +315,23 @@ class _lanczos_timeprop_numba:
         self.do_full_order = do_full_order
         self.breakdown_tol = 1e-14
         self.config = (maxsteps, target_convg, do_full_order, self.breakdown_tol)
-        self.H = H
         self._propagate_impl = _propagate
 
         if _is_sum_operator_input(H):
             self.dim, self.operator, coeff_specs = _normalize_sum_operator(H)
             self._propagate_impl = _get_sum_propagator(coeff_specs)
             self.scratch = _allocate_scratch(maxsteps, self.dim)
-        elif callable(H):
-            self.operator = _register_callable_object(H)
-            self.dim = None
-            self.scratch = None
         else:
             self.dim, self.operator = _normalize_static_operator(H)
             self.scratch = _allocate_scratch(maxsteps, self.dim)
-
-    def __del__(self):
-        if callable(self.H) and hasattr(self, "operator"):
-            _release_callable_object(self.operator)
 
     def propagate(self, phi0, ts, maxHT=None):
         phi0 = np.asarray(phi0, dtype=np.complex128)
         if phi0.ndim != 1:
             raise ValueError("phi0 must be a 1d complex array")
 
-        if self.dim is None:
-            if not callable(self.H):
-                raise ValueError("Internal error: non-callable operator should have dimension set")
-            self.dim = phi0.shape[0]
-            self.scratch = _allocate_scratch(self.maxsteps, self.dim)
-        else:
-            if phi0.shape[0] != self.dim:
-                raise ValueError("State dimension does not match Hamiltonian dimension")
+        if phi0.shape[0] != self.dim:
+            raise ValueError("State dimension does not match Hamiltonian dimension")
 
         ts = np.asarray(ts, dtype=np.float64)
         out = np.empty((ts.shape[0], self.dim), dtype=np.complex128)
